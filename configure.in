@@ -1,0 +1,64 @@
+#                                               -*- Autoconf -*-
+# Process this file with autoconf to produce a configure script.
+AC_INIT(SST, 0.01)
+AC_PREREQ(2.59)
+AC_CONFIG_SRCDIR([lib/regcli.cc])
+
+AC_LANG([C++])
+
+# Plain list of include directories without -I's, for qmake
+INCS=""
+AC_SUBST(INCS)
+
+# Check for required Qt 4 framework
+AC_ARG_WITH(qt, AC_HELP_STRING([--with-qt=DIR],
+		[Qt 4 toolkit location]))
+if test -n "$with_qt"; then
+	QMAKE="$with_qt/bin/qmake"
+	if ! test -x $QMAKE; then
+		AC_MSG_WARN([$QMAKE not found.])
+		QMAKE=""
+	fi
+else
+	AC_CHECK_PROGS(QMAKE,[qmake-qt4 qmake4 qmake])
+fi
+if test -n "$QMAKE"; then
+	AC_MSG_CHECKING([Qt toolkit version])
+	if test -n "$QMAKE" && ! ($QMAKE -v | grep -q "[Qt version 4[.][23456789]]"); then
+		AC_MSG_RESULT([wrong version.])
+		QMAKE=""
+	else
+		AC_MSG_RESULT([correct (version 4.2 or later).])
+	fi
+fi
+if test -z "$QMAKE"; then
+	AC_MSG_ERROR([SST requires Qt toolkit version 4.2 or later.
+		Please specify its location via '--with-qt=DIR',
+		or see http://www.trolltech.com/ to obtain it.])
+fi
+$QMAKE || exit 1
+
+# Check for OpenSSL crypto library
+AC_ARG_WITH(qt, AC_HELP_STRING([--with-openssl=DIR],
+		[OpenSSL install location]))
+if test -n "$with_openssl"; then
+	if test ! -f "$with_openssl/include/openssl/sha.h"; then
+		AC_MSG_ERROR([Cannot find OpenSSL headers in '$with_openssl/include/openssl'])
+	fi
+	CXXFLAGS="$CXXFLAGS -I$with_openssl/include"
+	INCS="$INCS $with_openssl/include"
+	LIBS="$LIBS -L$with_openssl/lib"
+fi
+AC_CHECK_LIB(crypto,RAND_bytes,,
+	[AC_MSG_ERROR([SST requires OpenSSL version 0.9.8 or later.
+		Please specify its location via '--with-openssl=DIR',
+		or see http://www.openssl.org/ to obtain it.])])
+AC_CHECK_LIB(crypto,SHA256_Init,,
+	[AC_MSG_ERROR([The installed version of OpenSSL appears to be too old;
+		SST requires OpenSSL version 0.9.8 or later.
+		Please specify another location via '--with-openssl=DIR',
+		or see http://www.openssl.org/ to obtain it.])])
+
+AC_MSG_NOTICE([Configuration successful.])
+
+AC_OUTPUT([top.pri])

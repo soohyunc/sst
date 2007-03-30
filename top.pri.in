@@ -1,0 +1,14 @@
+# This qmake include file defines the configuration variables
+# that need to be filled in by UIA's top-level configure script.
+# We isolate these in an include file so we don't have to
+# re-run configure every time a qmake profile changes.
+
+INCLUDEPATH += @INCS@
+LIBS += @LIBS@
+
+
+# Uncomment the following to build with profiling
+#QMAKE_CFLAGS+=-pg
+#QMAKE_CXXFLAGS+=-pg
+#QMAKE_LFLAGS+=-pg
+
