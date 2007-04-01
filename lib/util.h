@@ -168,6 +168,9 @@ QString bytesNumber(qint64 size);
 } // namespace SST
 
 
+// Hash function for QHostAddress (provided by Qt 4.2.x but not 4.1.x)
+uint qHash(const QHostAddress &addr);
+
 // Hash function for SST Endpoint structs
 uint qHash(const SST::Endpoint &ep);
 

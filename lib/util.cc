@@ -126,7 +126,7 @@ void Endpoint::decode(XdrStream &xs)
 	xs >> port;
 }
 
-#if 0	// provided by Qt as of version ???
+#if QT_VERSION < 0x040200	// provided by Qt as of version 4.2.x
 uint qHash(const QHostAddress &addr)
 {
 	switch (addr.protocol()) {

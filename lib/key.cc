@@ -1,4 +1,9 @@
 
+// XXX bug in g++ 4.1.2?  This must be declared before including QHash!?
+#include <QtGlobal>
+namespace SST { class Endpoint; }
+uint qHash(const SST::Endpoint &ep);
+
 #include <QtDebug>
 
 #include "key.h"

@@ -24,15 +24,15 @@ else
 fi
 if test -n "$QMAKE"; then
 	AC_MSG_CHECKING([Qt toolkit version])
-	if test -n "$QMAKE" && ! ($QMAKE -v | grep -q "[Qt version 4[.][23456789]]"); then
+	if test -n "$QMAKE" && ! ($QMAKE -v | grep -q "[Qt version 4[.][123456789]]"); then
 		AC_MSG_RESULT([wrong version.])
 		QMAKE=""
 	else
-		AC_MSG_RESULT([correct (version 4.2 or later).])
+		AC_MSG_RESULT([correct (version 4.1 or later).])
 	fi
 fi
 if test -z "$QMAKE"; then
-	AC_MSG_ERROR([SST requires Qt toolkit version 4.2 or later.
+	AC_MSG_ERROR([SST requires Qt toolkit version 4.1 or later.
 		Please specify its location via '--with-qt=DIR',
 		or see http://www.trolltech.com/ to obtain it.])
 fi
