@@ -326,7 +326,7 @@ SocketHostState::initSocket(QSettings *settings, int defaultport)
 	// Remember the port number we ended up using.
 	if (settings)
 		settings->setValue("port", defaultport);
-	qDebug("Bound to port %d", defaultport);
+	//qDebug("Bound to port %d", defaultport);
 
 	return mainsock;
 }

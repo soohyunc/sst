@@ -222,7 +222,9 @@ SimHost::SimHost(Simulator *sim, QHostAddress addr)
 	sim->hosts.insert(addr, this);
 
 	initSocket(NULL);
-	initHostIdent(NULL);
+
+	// expensive, and can be done lazily if we need a cryptographic ID...
+	//initHostIdent(NULL);
 }
 
 SimHost::~SimHost()
