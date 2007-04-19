@@ -14,7 +14,7 @@
 using namespace SST;
 
 
-static const int bucketSize = 5;
+static const int bucketSize = 2;
 
 QHash<QByteArray, Node*> nodes;
 
@@ -38,27 +38,27 @@ int SST::affinity(const NodeId &a, const NodeId &b)
 }
 
 
-////////// PathInfo //////////
+////////// Path //////////
 
-int PathInfo::hopsBefore(const NodeId &nid)
+int Path::hopsBefore(const NodeId &nid)
 {
 	if (start == nid)
 		return 0;
-	for (int i = 0; i < path.size(); i++) {
-		if (path[i].nid == nid)
+	for (int i = 0; i < hops.size(); i++) {
+		if (hops[i].nid == nid)
 			return i+1;
 	}
 	return -1;
 }
 
-PathInfo &PathInfo::operator+=(const PathInfo &tail)
+Path &Path::operator+=(const Path &tail)
 {
 	// The first path's target must be the second path's origin.
 	Q_ASSERT(targetId() == tail.originId());
 
 	// Append the paths, avoiding creating unnecessary routing loops.
 	NodeId id = start;
-	for (int i = tail.path.size(); ; i--) {
+	for (int i = tail.hops.size(); ; i--) {
 		Q_ASSERT(i >= 0);
 		NodeId tnid = tail.beforeHopId(i);
 
@@ -67,7 +67,7 @@ PathInfo &PathInfo::operator+=(const PathInfo &tail)
 			continue;
 		Q_ASSERT(beforeHopId(nhops) == tnid);
 
-		path = path.mid(0, nhops) + tail.path.mid(i);
+		hops = hops.mid(0, nhops) + tail.hops.mid(i);
 		break;
 	}
 
@@ -81,36 +81,36 @@ PathInfo &PathInfo::operator+=(const PathInfo &tail)
 
 ////////// Bucket //////////
 
-bool Bucket::insert(const PathInfo &npi)
+bool Bucket::insert(const Path &npi)
 {
-	// Check for an existing PathInfo entry for this path
-	for (int i = 0; i < pis.size(); i++) {
-		PathInfo &pi = pis[i];
-		if (pi.path != npi.path)
+	// Check for an existing Path entry for this path
+	for (int i = 0; i < paths.size(); i++) {
+		Path &pi = paths[i];
+		if (pi.hops != npi.hops)
 			continue;
 
 		// Duplicate found - only keep the latest one.
 		if (npi.stamp <= pi.stamp)
-			return false;	// New PathInfo is older: discard
+			return false;	// New Path is older: discard
 
-		// Replace old PathInfo with new one
-		pis.removeAt(i);
+		// Replace old Path with new one
+		paths.removeAt(i);
 		break;
 	}
 
-	// Insert the new PathInfo according to distance
+	// Insert the new Path according to distance
 	int i;
-	for (i = 0; i < pis.size() && pis[i].weight <= npi.weight; i++)
+	for (i = 0; i < paths.size() && paths[i].weight <= npi.weight; i++)
 		;
 	if (i >= bucketSize)
 		return false;	// Off the end of the bucket: discard
-	pis.insert(i, npi);
+	paths.insert(i, npi);
 
-	// Truncate the PathInfo list to our maximum bucket size
-	while (pis.size() > bucketSize)
-		pis.removeLast();
+	// Truncate the Path list to our maximum bucket size
+	while (paths.size() > bucketSize)
+		paths.removeLast();
 
-	return true;	// New PathInfo is accepted!
+	return true;	// New Path is accepted!
 }
 
 
@@ -121,10 +121,6 @@ Router::Router(Host *h, const QByteArray &id, QObject *parent)
 	id(id)
 {
 }
-
-//bool Router::insertPath(const PathInfo &p)
-//{
-//}
 
 void Router::receive(QByteArray &msg, XdrStream &ds,
 			const SocketEndpoint &src)
@@ -190,45 +186,101 @@ void Node::updateNeighbors()
 	}
 }
 
-bool Node::forceFill()
+int visittag;
+
+bool Node::gotAnnounce(int aff, Path fwpath, Path revpath)
+{
+	Q_ASSERT(fwpath.originId() == id());
+
+	// Got a self-announcement from some other node.
+
+	// Add ourselves to the reverse path if not done already.
+	NodeId previd = revpath.originId();
+	if (previd != id()) {
+		Q_ASSERT(neighbors.contains(previd));
+		revpath.prepend(id(), 0/*XXX*/, neighbors[previd].dist);
+	}
+
+	// Forward the announcement as specified by the forward-path.
+	if (!fwpath.isEmpty()) {
+		NodeId nextid = fwpath.afterHopId(0);
+		Q_ASSERT(neighbors.contains(nextid));
+		fwpath.removeFirst();
+		return nodes[nextid]->gotAnnounce(aff, fwpath, revpath);
+	}
+
+	// The announcement has reached its immediate target.
+	if (vtag == visittag)
+		return false;	// already visited
+	vtag = visittag;
+	Q_ASSERT(affinity(id(), revpath.targetId()) >= aff);
+
+	// Insert the return path into our routing table if it's useful to us.
+	bool progress = rtr.insertPath(revpath);
+	if (progress) {
+
+		// The announcement proved useful to us,
+		// so it's apparently still "in range" at this affinity.
+		// Rebroadcast it to all neighbors we know about
+		// that have at least the same affinity to the source,
+		// keeping the announcement's affinity level the same.
+		for (int i = aff; i < rtr.buckets.size(); i++) {
+			Bucket &b = rtr.buckets[i];
+			for (int j = 0; j < b.paths.size(); j++) {
+				Path p = b.paths[j];
+				Q_ASSERT(p.originId() == id());
+				Q_ASSERT(p.numHops() > 0);
+				if (revpath.hopsBefore(p.targetId()) >= 0)
+					continue;	// already visited
+				progress |= gotAnnounce(aff, p, revpath);
+			}
+		}
+
+	} else {
+		// The announcement has exhausted its useful range
+		// at its current origin-affinity level.
+		// Rebroadcast the announcement with the next higher affinity,
+		// expanding its range to more distant nodes.
+		// All the appropriate nodes are in our bucket number 'aff',
+		// unless our affinity to the source is already higher...
+		int minaff = aff, maxaff = aff;
+		if (affinity(id(), revpath.targetId()) > aff) {
+			minaff = aff+1;
+			maxaff = affinity(id(), revpath.targetId());
+		}
+		maxaff = qMin(maxaff, rtr.buckets.size());
+		for (int i = minaff; i <= maxaff; i++) {
+			Bucket &b = rtr.buckets[i];
+			for (int j = 0; j < b.paths.size(); j++) {
+				Path p = b.paths[j];
+				Q_ASSERT(p.originId() == id());
+				Q_ASSERT(p.numHops() > 0);
+				Q_ASSERT(rtr.affinityWith(p.targetId()) == i);
+				if (revpath.hopsBefore(p.targetId()) >= 0)
+					continue;	// already visited
+				progress |= gotAnnounce(aff+1, p, revpath);
+			}
+		}
+	}
+
+	return progress;
+}
+
+bool Node::sendAnnounce()
 {
 	bool progress = false;
+	visittag++;
+	qDebug() << "visittag" << visittag;
 
-	// First generate paths to one-hop neighbors
+	// Send an announcement to our immediate neighbors;
+	// they'll forward it on to more distant nodes as appropriate...
 	foreach (const NodeId &nbid, neighbors.keys()) {
 		if (nbid == id())
 			continue;	// don't generate paths to myself
 		Neighbor &nb = neighbors[nbid];
-		PathInfo p(id(), 0, nbid, nb.dist);
-		progress |= rtr.insertPath(p);
-	}
-
-	// Now search through our existing neighbors' neighbor tables
-	// to find paths to other potentially higher-affinity neighbors
-	for (int i = 0; i < rtr.buckets.size(); i++) {
-		Bucket &b = rtr.buckets[i];
-		for (int j = 0; j < b.pis.size(); j++) {
-			PathInfo &pi = b.pis[j];
-
-			// Take this neighbor as an intermediate neighbor
-			// from which to find other more distant
-			// but higher-affinity neighbors.
-			NodeId nid = pi.targetId();
-			Node *n = nodes[nid];
-			Q_ASSERT(nid != id());
-
-			// Any other nodes with higher affinity to us than nid
-			// will be in bucket i in node n's neighbor table.
-			if (n->rtr.buckets.size() <= i)
-				continue;
-			Bucket &nb = n->rtr.buckets[i];
-			for (int nj = 0; nj < nb.pis.size(); nj++) {
-				PathInfo &npi = nb.pis[nj];
-				if (npi.targetId() == id())
-					continue;
-				progress |= rtr.insertPath(pi + npi);
-			}
-		}
+		Path fwpath(id(), 0, nbid, nb.dist);
+		Path revpath(id());
+		progress |= gotAnnounce(0, fwpath, revpath);
 	}
 
 	return progress;
@@ -244,7 +296,7 @@ int main(int argc, char **argv)
 	Simulator sim;
 
 	quint32 addr = QHostAddress("1.1.1.1").toIPv4Address();
-	for (int i = 0; i < 100; i++) {
+	for (int i = 0; i < 150; i++) {
 
 		// Pick a pseudorandom label for this node (32 bits for now)
 		QByteArray id;
@@ -266,10 +318,10 @@ int main(int argc, char **argv)
 	bool progress;
 	int round = 0;
 	do {
-		qDebug() << "forceFill, round" << ++round;
+		qDebug() << "announce, round" << ++round;
 		progress = false;
 		foreach (Node *n, nodes)
-			progress |= n->forceFill();
+			progress |= n->sendAnnounce();
 	} while (progress);
 
 	// Create a visualization window

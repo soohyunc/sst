@@ -191,11 +191,11 @@ void ViewWidget::mousePressEvent(QMouseEvent *event)
 		// Find and select all the node's neighbors and their edges
 		for (int i = 0; i < n->rtr.buckets.size(); i++) {
 			Bucket &b = n->rtr.buckets[i];
-			for (int j = 0; j < b.pis.size(); j++) {
-				PathInfo &pi = b.pis[j];
+			for (int j = 0; j < b.paths.size(); j++) {
+				Path &pi = b.paths[j];
 				NodeId id = n->id();
-				for (int k = 0; k < pi.path.size(); k++) {
-					Hop &h = pi.path[k];
+				for (int k = 0; k < pi.hops.size(); k++) {
+					Hop &h = pi.hops[k];
 					selEdges.insert(Edge(id, h.nid), i);
 					id = h.nid;
 				}
