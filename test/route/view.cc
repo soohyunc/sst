@@ -1,6 +1,8 @@
 
 #include <math.h>
 
+#include <QSet>
+#include <QPair>
 #include <QLabel>
 #include <QSlider>
 #include <QPainter>
@@ -70,8 +72,8 @@ void ViewWidget::paintEvent(QPaintEvent *)
 			(worldWidth * vscale) - 1, (worldHeight * vscale) - 1);
 
 	// First draw all of the edges in the network.
+	QColor color;
 	QPen pen(Qt::white);
-	//pen.setWidth(1);
 	foreach (Node *n, nodes) {
 		foreach (QByteArray nnid, n->neighbors.keys()) {
 			Node *nn = nodes.value(nnid);
@@ -87,10 +89,21 @@ void ViewWidget::paintEvent(QPaintEvent *)
 			double rad = atan2(n->y - nn->y, n->x - nn->x);
 			painter.rotate(rad * (180.0 / M_PI));
 
+			// Color indicates edge selection state.
+			if (selEdges.value(Edge(n->id(), nnid), -1)
+					>= viewaff) {
+				color = Qt::yellow;
+				pen.setWidth(2);
+			} else {
+				color = Qt::white;
+				pen.setWidth(0);
+			}
+
 			// Shade the link according to the loss rate.
-			double quality = 1.0 - n->neighbors.value(nnid);
-			int weight = qMax(0, qMin(255, (int)(255 * quality)));
-			pen.setColor(QColor(255, 255, 255, weight));
+			double quality = 1.0 - n->neighbors[nnid].loss;
+			double alpha = qMax(0.0, qMin(1.0, quality));
+			color.setAlphaF(alpha);
+			pen.setColor(color);
 			painter.setPen(pen);
 
 			// Draw an off-center line with a one-sided arrowhead,
@@ -114,15 +127,31 @@ void ViewWidget::paintEvent(QPaintEvent *)
 
 	// Now draw all the nodes.
 	foreach (Node *n, nodes) {
+		NodeId nid = n->id();
 		painter.setPen(Qt::white);
 
-		if (selNodeId == n->id())
+		// Pen highlight for selected nodes and neighbors
+		QPen pen(Qt::white);
+		bool isneighbor = selNodeId == nid
+				|| selNeighbors.value(nid, -1) >= viewaff;
+		if (isneighbor) {
+			pen.setColor(Qt::yellow);
+			pen.setWidth(2);
+			Q_ASSERT(affinity(selNodeId, nid) >= viewaff);
+		}
+		painter.setPen(pen);
+
+		// Brush indicates affinity
+		if (selNodeId == n->id()) {
 			painter.setBrush(Qt::yellow);
-		else if (selNodeId.isEmpty() ||
-				affinity(selNodeId, n->id()) >= viewaff)
+		} else if (isneighbor) {
+			painter.setBrush(Qt::cyan);
+		} else if (selNodeId.isEmpty() ||
+				affinity(selNodeId, n->id()) >= viewaff) {
 			painter.setBrush(Qt::blue);
-		else
-			painter.setBrush(Qt::darkGray);
+		} else {
+			painter.setBrush(Qt::black);
+		}
 
 		painter.drawEllipse(n->x * vscale - nodeRadius,
 					n->y * vscale - nodeRadius,
@@ -137,6 +166,11 @@ void ViewWidget::mousePressEvent(QMouseEvent *event)
 	int mx = event->x() - vxofs;
 	int my = event->y() - vyofs;
 	//qDebug() << "mouse" << x << y;
+
+	// Clear any existing selection
+	selNodeId = QByteArray();
+	selNeighbors.clear();
+	selEdges.clear();
 
 	// Find the node the user clicked on, if any
 	foreach (Node *n, nodes) {
@@ -153,11 +187,26 @@ void ViewWidget::mousePressEvent(QMouseEvent *event)
 
 		// Select it!
 		selNodeId = n->id();
-		return update();
+
+		// Find and select all the node's neighbors and their edges
+		for (int i = 0; i < n->rtr.buckets.size(); i++) {
+			Bucket &b = n->rtr.buckets[i];
+			for (int j = 0; j < b.pis.size(); j++) {
+				PathInfo &pi = b.pis[j];
+				NodeId id = n->id();
+				for (int k = 0; k < pi.path.size(); k++) {
+					Hop &h = pi.path[k];
+					selEdges.insert(Edge(id, h.nid), i);
+					id = h.nid;
+				}
+				selNeighbors.insert(id, i);
+			}
+		}
+
+		break;
 	}
 
-	// Nothing selected - clear any existing selection
-	selNodeId = QByteArray();
+	// Nothing selected - just clear any existing selection
 	return update();
 }
 
@@ -183,6 +232,8 @@ ViewWindow::ViewWindow(QWidget *parent)
 	affslider->setRange(0, 32);
 	affslider->setTickInterval(1);
 	affslider->setTickPosition(QSlider::TicksBelow);
+	affslider->setSingleStep(1);
+	affslider->setPageStep(1);
 	connect(affslider, SIGNAL(valueChanged(int)), 
 		this, SLOT(setAffinity(int)));
 

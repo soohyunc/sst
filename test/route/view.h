@@ -2,6 +2,7 @@
 #ifndef NETVIEW_H
 #define NETVIEW_H
 
+#include <QHash>
 #include <QWidget>
 #include <QMainWindow>
 
@@ -15,10 +16,14 @@ class ViewWidget : public QWidget
 	Q_OBJECT
 
 private:
+	typedef QPair<QByteArray,QByteArray> Edge;
+
 	double vscale;
 	int vxofs, vyofs;
 
 	QByteArray selNodeId;
+	QHash<QByteArray,int> selNeighbors;
+	QHash<Edge,int> selEdges;
 	int viewaff;
 
 public:
@@ -52,5 +57,8 @@ private slots:
 };
 
 } // namespace SST
+
+inline uint qHash(const QPair<QByteArray,QByteArray> &edge)
+	{ return qHash(edge.first) + qHash(edge.second); }
 
 #endif	// NETVIEW_H
