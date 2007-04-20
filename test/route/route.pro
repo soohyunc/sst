@@ -15,6 +15,6 @@ POST_TARGETDEPS += ../../libsst.a ../../libsst_test.a
 }
 
 # Input sources
-HEADERS += main.h view.h
-SOURCES += main.cc view.cc
+HEADERS += main.h route.h view.h
+SOURCES += main.cc route.cc view.cc
 
