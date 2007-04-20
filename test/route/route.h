@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QByteArray>
+#include <QtDebug>
 
 #include "timer.h"
 #include "sock.h"
@@ -44,13 +45,18 @@ struct Path
 	double weight;		// Measured weight/distance/latency of path
 	Time stamp;		// Time path was discovered or last checked
 
+	inline Path() : weight(0) { }
 	inline Path(const NodeId &start) : start(start), weight(0) { }
 	inline Path(const NodeId &start, quint32 rid, NodeId nid,
 			double weight)
 		: start(start), weight(weight) { hops.append(Hop(rid, nid)); }
 
-	inline bool isEmpty() { return hops.isEmpty(); }
-	inline int numHops() { return hops.size(); }
+	// A null Path has no starting node Id
+	inline bool isNull() const { return start.isEmpty(); }
+
+	// An empty path has no hops
+	inline bool isEmpty() const { return hops.isEmpty(); }
+	inline int numHops() const { return hops.size(); }
 
 	inline NodeId originId() const { return start; }
 	inline NodeId targetId() const
@@ -64,7 +70,7 @@ struct Path
 
 	/// Return the number of hops to reach a given node,
 	/// 0 if the node is our starting point, -1 if it is not on the path.
-	int hopsBefore(const NodeId &nid);
+	int hopsBefore(const NodeId &nid) const;
 
 	/// Append a new hop at the end of this path.
 	void append(quint32 rid, NodeId nid, double hopWeight)
@@ -83,6 +89,9 @@ struct Path
 
 	inline Path operator+(const Path &tail) const
 		{ Path pi(*this); pi += tail; return pi; }
+
+	// Test the route for loops and return true if there are any.
+	bool looping() const;
 };
 
 // A node's information about some other node it keeps tabs on
@@ -108,6 +117,11 @@ public:
 	/// Returns true if the new Path was actually accepted:
 	/// i.e., if the bucket wasn't already full of "better" paths.
 	bool insert(const Path &path);
+
+	/// Return our current internal distance horizon for this bucket:
+	/// i.e., the weight beyond which we don't need more nodes.
+	/// Returns +infinity if the bucket isn't full yet.
+	double horizon() const;
 };
 
 class Router : public SocketReceiver
@@ -134,10 +148,23 @@ public:
 	inline bool insertPath(const Path &p)
 		{ return bucket(p.targetId()).insert(p); }
 
+	// Return the current best path to a given node.
+	Path pathTo(const NodeId &id) const;
+
+	// Find the best known path to our nearest neighbor to 'id'.
+	Path nearestNeighborPath(const NodeId &id) const;
+
+	// Return the ID of the node in our neighbor tables nearest to 'id'.
+	inline NodeId nearestNeighbor(const NodeId &id) const
+		{ return nearestNeighborPath(id).targetId(); }
+
 	virtual void receive(QByteArray &msg, XdrStream &ds,
 				const SocketEndpoint &src);
 };
 
 } // namespace SST
+
+QDebug &operator<<(QDebug debug, const SST::Path &p);
+
 
 #endif	// ROUTE_H

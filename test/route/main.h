@@ -35,8 +35,8 @@ public:
 	};
 	QHash<NodeId,Neighbor> neighbors;
 
-	// Visit tag, for use in cheesy traversal algorithms...
-	int vtag;
+	// Queue of neighbors whose neighbor tables we need to scan
+	QList<NodeId> scanq;
 
 
 	Node(Simulator *sim, const QByteArray &id, const QHostAddress &addr);
@@ -49,13 +49,21 @@ public:
 
 	inline QByteArray id() { return rtr.id; }
 
+	/// Reverse a path.
+	/// Usable for testing purposes only and not in the actual router,
+	/// because it doesn't handle routing ids properly.
+	static Path reversePath(const Path &p);
+
 	/// Directly "force-fill" this router's neighbor tables
 	/// based on current physical and virtual neighbors.
 	/// Returns true if it found and inserted any new paths.
 	//bool forceFill();
 
-	bool gotAnnounce(int aff, Path fwpath, Path revpath);
+	bool gotAnnounce(QSet<NodeId> &visited, int aff, const Path &revpath);
 	bool sendAnnounce();
+
+	bool optimizePath(const Path &oldpath);
+	bool optimize();
 };
 
 } // namespace SST

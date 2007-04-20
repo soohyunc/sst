@@ -1,5 +1,5 @@
 
-//#include <math.h>
+#include <math.h>
 //#include <stdlib.h>
 
 #include <QtDebug>
@@ -33,7 +33,7 @@ int SST::affinity(const NodeId &a, const NodeId &b)
 
 ////////// Path //////////
 
-int Path::hopsBefore(const NodeId &nid)
+int Path::hopsBefore(const NodeId &nid) const
 {
 	if (start == nid)
 		return 0;
@@ -48,6 +48,9 @@ Path &Path::operator+=(const Path &tail)
 {
 	// The first path's target must be the second path's origin.
 	Q_ASSERT(targetId() == tail.originId());
+
+	//Q_ASSERT(!looping());
+	//Q_ASSERT(!tail.looping());
 
 	// Append the paths, avoiding creating unnecessary routing loops.
 	NodeId id = start;
@@ -68,7 +71,28 @@ Path &Path::operator+=(const Path &tail)
 	weight += tail.weight;
 	stamp = qMin(stamp, tail.stamp);
 
+	Q_ASSERT(!looping());
 	return *this;
+}
+
+bool Path::looping() const
+{
+	for (int i = 0; i < numHops(); i++)
+		for (int j = i; j < numHops(); j++)
+			if (beforeHopId(i) == afterHopId(j))
+				return true;
+	return false;
+}
+
+QDebug &operator<<(QDebug debug, const Path &p)
+{
+	debug << "Path hops" << p.numHops() << "weight" << p.weight;
+	debug.nospace() << " (" << p.start.toBase64();
+	for (int i = 0; i < p.numHops(); i++)
+		debug << " [" << p.hops[i].rid << "] -> "
+			<< p.hops[i].nid.toBase64();
+	debug << ")";
+	return debug.space();
 }
 
 
@@ -76,6 +100,7 @@ Path &Path::operator+=(const Path &tail)
 
 bool Bucket::insert(const Path &npi)
 {
+#if 0	// (allowing multiple paths to the same node in one bucket)
 	// Check for an existing Path entry for this path
 	for (int i = 0; i < paths.size(); i++) {
 		Path &pi = paths[i];
@@ -90,6 +115,23 @@ bool Bucket::insert(const Path &npi)
 		paths.removeAt(i);
 		break;
 	}
+#else	// (allowing only one path per target node)
+	// Check for an existing Path entry for this target
+	NodeId ntid = npi.targetId();
+	for (int i = 0; i < paths.size(); i++) {
+		Path &pi = paths[i];
+		if (pi.targetId() != ntid)
+			continue;
+
+		// Duplicate found - only keep the shortest path.
+		if (npi.weight >= pi.weight)
+			return false;	// New Path is longer: discard
+
+		// Replace old Path with new one
+		paths.removeAt(i);
+		break;
+	}
+#endif
 
 	// Insert the new Path according to distance
 	int i;
@@ -106,6 +148,13 @@ bool Bucket::insert(const Path &npi)
 	return true;	// New Path is accepted!
 }
 
+double Bucket::horizon() const
+{
+	if (paths.size() < bucketSize)
+		return HUGE_VAL;
+	return paths[bucketSize-1].weight;
+}
+
 
 ////////// Router //////////
 
@@ -113,6 +162,34 @@ Router::Router(Host *h, const QByteArray &id, QObject *parent)
 :	SocketReceiver(h, routerMagic, parent),
 	id(id)
 {
+}
+
+Path Router::pathTo(const NodeId &targid) const
+{
+	int bn = affinityWith(targid);
+	if (bn >= buckets.size())
+		return Path();	// No known path - no bucket even
+
+	const Bucket &b = buckets[bn];
+	for (int i = 0; i < b.paths.size(); i++) {
+		const Path &p = b.paths[i];
+		Q_ASSERT(p.originId() == id);
+		if (p.targetId() == targid)
+			return p;
+	}
+
+	return Path();	// No known path
+}
+
+Path Router::nearestNeighborPath(const NodeId &id) const
+{
+	int aff = affinityWith(id);
+	if (aff >= buckets.size())
+		return NodeId();
+	const Bucket &b = buckets[aff];
+	if (b.paths.isEmpty())
+		return NodeId();
+	return b.paths[0];
 }
 
 void Router::receive(QByteArray &msg, XdrStream &ds,

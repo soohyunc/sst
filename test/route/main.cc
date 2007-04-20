@@ -75,34 +75,20 @@ void Node::updateNeighbors()
 	}
 }
 
-int visittag;
-
-bool Node::gotAnnounce(int aff, Path fwpath, Path revpath)
+bool Node::gotAnnounce(QSet<NodeId> &visited, int aff, const Path &revpath)
 {
-	Q_ASSERT(fwpath.originId() == id());
-
 	// Got a self-announcement from some other node.
+	Q_ASSERT(revpath.originId() == id());
 
-	// Add ourselves to the reverse path if not done already.
-	NodeId previd = revpath.originId();
-	if (previd != id()) {
-		Q_ASSERT(neighbors.contains(previd));
-		revpath.prepend(id(), 0/*XXX*/, neighbors[previd].dist);
-	}
-
-	// Forward the announcement as specified by the forward-path.
-	if (!fwpath.isEmpty()) {
-		NodeId nextid = fwpath.afterHopId(0);
-		Q_ASSERT(neighbors.contains(nextid));
-		fwpath.removeFirst();
-		return nodes[nextid]->gotAnnounce(aff, fwpath, revpath);
-	}
-
-	// The announcement has reached its immediate target.
-	if (vtag == visittag)
+	// Nodes ignore duplicate copies of announcements they receive.
+	if (visited.contains(id()))
 		return false;	// already visited
-	vtag = visittag;
+	visited.insert(id());
 	Q_ASSERT(affinity(id(), revpath.targetId()) >= aff);
+
+	// Reverse path shouldn't have loops in it...
+	if (revpath.looping()) qDebug() << revpath;
+	Q_ASSERT(!revpath.looping());
 
 	// Insert the return path into our routing table if it's useful to us.
 	bool progress = rtr.insertPath(revpath);
@@ -117,11 +103,16 @@ bool Node::gotAnnounce(int aff, Path fwpath, Path revpath)
 			Bucket &b = rtr.buckets[i];
 			for (int j = 0; j < b.paths.size(); j++) {
 				Path p = b.paths[j];
+				NodeId tid = p.targetId();
 				Q_ASSERT(p.originId() == id());
 				Q_ASSERT(p.numHops() > 0);
-				if (revpath.hopsBefore(p.targetId()) >= 0)
+				if (visited.contains(tid))
 					continue;	// already visited
-				progress |= gotAnnounce(aff, p, revpath);
+				if (revpath.hopsBefore(tid) >= 0)
+					continue;	// already in path
+				Path newrev = reversePath(p) + revpath;
+				progress |= nodes[tid]->gotAnnounce(
+						visited, aff, newrev);
 			}
 		}
 
@@ -142,12 +133,17 @@ bool Node::gotAnnounce(int aff, Path fwpath, Path revpath)
 			Bucket &b = rtr.buckets[i];
 			for (int j = 0; j < b.paths.size(); j++) {
 				Path p = b.paths[j];
+				NodeId tid = p.targetId();
 				Q_ASSERT(p.originId() == id());
 				Q_ASSERT(p.numHops() > 0);
-				Q_ASSERT(rtr.affinityWith(p.targetId()) == i);
-				if (revpath.hopsBefore(p.targetId()) >= 0)
+				Q_ASSERT(rtr.affinityWith(tid) == i);
+				if (visited.contains(tid))
 					continue;	// already visited
-				progress |= gotAnnounce(aff+1, p, revpath);
+				if (revpath.hopsBefore(tid) >= 0)
+					continue;	// already visited
+				Path newrev = reversePath(p) + revpath;
+				progress |= nodes[tid]->gotAnnounce(
+						visited, aff+1, newrev);
 			}
 		}
 	}
@@ -158,20 +154,124 @@ bool Node::gotAnnounce(int aff, Path fwpath, Path revpath)
 bool Node::sendAnnounce()
 {
 	bool progress = false;
-	visittag++;
-	qDebug() << "visittag" << visittag;
 
 	// Send an announcement to our immediate neighbors;
 	// they'll forward it on to more distant nodes as appropriate...
+	QSet<NodeId> visited;
 	foreach (const NodeId &nbid, neighbors.keys()) {
 		if (nbid == id())
 			continue;	// don't generate paths to myself
 		Neighbor &nb = neighbors[nbid];
-		Path fwpath(id(), 0, nbid, nb.dist);
-		Path revpath(id());
-		progress |= gotAnnounce(0, fwpath, revpath);
+		Path revpath(nbid, 0, id(), nb.dist);
+		progress |= nodes[nbid]->gotAnnounce(visited, 0, revpath);
+	}
+	//qDebug() << this << "announced to" << visited.size() << "nodes";
+
+	return progress;
+}
+
+#if 0
+bool Node::scan()
+{
+	if (scanq.isEmpty())
+		return false;
+	NodeId scanid = scanq.takeFirst();
+
+	// Find a path to the neighbor to scan
+	Path p(id());
+	if (scanid != id())
+		p = pathTo(scanid);
+	if (p.isNull()) {
+		qDebug() << this << "supposed to scan" << scanid.toBase64()
+			<< "but no longer in neighbor table";
+		return true;	// we at least removed it from scanq
 	}
 
+	return true;
+}
+#endif
+
+Path Node::reversePath(const Path &p)
+{
+	//qDebug() << "before:" << p;
+
+	Path np(p.targetId());
+	for (int i = p.numHops()-1; i >= 0; i--)
+		np.append(0/*XXX*/, p.beforeHopId(i), 0);
+
+	np.weight = p.weight;
+	np.stamp = p.stamp;
+
+	//qDebug() << "after:" << np;
+
+	Q_ASSERT(np.numHops() == p.numHops());
+	Q_ASSERT(np.originId() == p.targetId());
+	Q_ASSERT(np.targetId() == p.originId());
+
+	return np;
+}
+
+bool Node::optimizePath(const Path &oldpath)
+{
+	const NodeId &targid = oldpath.targetId();
+	Q_ASSERT(targid != id());
+
+	Node *hn = this;
+	Node *tn = nodes[targid];
+	Path head(id());
+	Path tail(targid);
+
+	// Move hn and tn toward each other, building the head and tail paths,
+	// until we reach some common midpoint node.
+	while (hn != tn) {
+		int aff = affinity(hn->id(), tn->id());
+
+		Path hnp = hn->rtr.nearestNeighborPath(tn->id());
+		NodeId hnn = hnp.targetId();
+		Q_ASSERT(!hnn.isEmpty() && affinity(hnn, tn->id()) > aff);
+
+		Path tnp = tn->rtr.nearestNeighborPath(hn->id());
+		NodeId tnn = tnp.targetId();
+		Q_ASSERT(!tnn.isEmpty() && affinity(tnn, hn->id()) > aff);
+
+		if (hnp.weight <= tnp.weight) {
+			// Head hop is lighter - extend the head path.
+			hn = nodes[hnn];
+			head += hnp;
+		} else {
+			// Tail hop is lighter - prepend to the tail path.
+			tn = nodes[tnn];
+			tail = (reversePath(tnp) + tail);
+		}
+	}
+	Q_ASSERT(head.originId() == id());
+	Q_ASSERT(head.targetId() == tail.originId());
+	Q_ASSERT(tail.targetId() == targid);
+
+	Path newpath = head + tail;
+
+	if (newpath.weight >= oldpath.weight)
+		return false;	// no improvement
+
+	qDebug() << "optimized path: old weight" << oldpath.weight
+			<< "hops" << oldpath.numHops()
+			<< "new weight" << newpath.weight
+			<< "hops" << newpath.numHops();
+
+	rtr.insertPath(newpath);
+	return true;
+}
+
+bool Node::optimize()
+{
+	bool progress = false;
+	for (int i = 0; i < rtr.buckets.size(); i++) {
+		Bucket &b = rtr.buckets[i];
+		for (int j = 0; j < b.paths.size(); j++) {
+			Path &p = b.paths[j];
+			progress |= optimizePath(p);
+		}
+	}
 	return progress;
 }
 
@@ -204,6 +304,8 @@ int main(int argc, char **argv)
 		n->updateNeighbors();
 
 	// Fill in nodes' neighbor buckets
+	foreach (Node *n, nodes)
+		n->scanq.append(n->id());
 	bool progress;
 	int round = 0;
 	do {
@@ -211,6 +313,15 @@ int main(int argc, char **argv)
 		progress = false;
 		foreach (Node *n, nodes)
 			progress |= n->sendAnnounce();
+	} while (progress);
+
+	// Progressively optimize nodes' neighbor tables
+	round = 0;
+	do {
+		qDebug() << "optimize, round" << ++round;
+		progress = false;
+		foreach (Node *n, nodes)
+			progress |= n->optimize();
 	} while (progress);
 
 	// Create a visualization window
