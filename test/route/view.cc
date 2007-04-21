@@ -102,7 +102,7 @@ void ViewWidget::paintEvent(QPaintEvent *)
 			// Shade the link according to the loss rate.
 			double quality = 1.0 - n->neighbors[nnid].loss;
 			double alpha = qMax(0.0, qMin(1.0, quality));
-			color.setAlphaF(alpha);
+			//color.setAlphaF(alpha);
 			pen.setColor(color);
 			painter.setPen(pen);
 

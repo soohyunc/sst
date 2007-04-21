@@ -4,6 +4,7 @@
 
 #include <QList>
 #include <QHash>
+#include <QMultiMap>
 #include <QApplication>
 #include <QtDebug>
 
@@ -14,6 +15,15 @@
 using namespace SST;
 
 
+// Number of nodes to simulate
+static const int numNodes = 100;
+
+// Minimum and maximum radio range
+static const int minRange = 10;
+static const int maxRange = 20;
+
+
+QList<Node*> nodelist;
 QHash<QByteArray, Node*> nodes;
 
 
@@ -211,6 +221,84 @@ Path Node::reversePath(const Path &p)
 	return np;
 }
 
+struct ShortestPathInfo {
+	double weight;
+	Node *prev;
+
+	inline ShortestPathInfo() { weight = HUGE_VAL; prev = NULL; }
+};
+
+Path Node::shortestPath(const NodeId &a, const NodeId &b)
+{
+	Node *na = nodes[a];
+	Node *nb = nodes[b];
+
+	// Maintain a priority queue of possible paths
+	QHash<Node*,ShortestPathInfo> spi;
+	QMultiMap<double,Node*> nq;	// Priority queue of unvisited nodes
+
+	spi[na].weight = 0;
+	nq.insert(0, na);
+
+	while (true) {
+		// If we run out of nodes, there is no path!
+		if (nq.isEmpty()) {
+			qDebug() << "shortestPath: no path from"
+				<< a.toBase64() << "to" << b.toBase64();
+			return Path();
+		}
+
+		// Grab the closest unvisited node from the priority queue
+		QMultiMap<double,Node*>::iterator i(nq.constBegin());
+		Node *n = i.value();
+		ShortestPathInfo &nspi = spi[n];
+		double nweight = i.key();
+		nq.erase(i);
+
+		// Once we hit a path that leads to the desired target,
+		// we know it must be the shortest.
+		if (n == nb)
+			break;
+
+		// If the weight at this priority queue entry
+		// is larger than our best known weight for that node,
+		// it means we've already found a better path to that node:
+		// this is just a stale leftover nq entry, so skip.
+		// (We leave stale entries becase it's a pain to remove them.)
+		if (nweight != nspi.weight) {
+			Q_ASSERT(nweight > nspi.weight);
+			continue;
+		}
+
+		// Add new paths leading from this node
+		foreach (const NodeId &nbid, n->neighbors.keys()) {
+			Neighbor &nb = n->neighbors[nbid];
+			Node *nn = nodes[nbid];
+			ShortestPathInfo &nnspi = spi[nn];
+
+			double nnweight = nweight + nb.dist;
+			if (nnweight >= nnspi.weight)
+				continue;
+
+			// Adjust ShortestPathInfo for new path,
+			// and add a new priority queue entry for it.
+			nnspi.weight = nnweight;
+			nnspi.prev = n;
+			nq.insert(nnweight, nn);
+		}
+	}
+
+	// Build a path from b to a, then reverse it
+	Path p(b);
+	Node *n = nb;
+	while (n != na) {
+		n = spi.value(n).prev;
+		p.append(0/*XXX*/, n->id(), 0);
+	}
+	p.weight = spi.value(nb).weight;
+	return reversePath(p);
+}
+
 bool Node::optimizePath(const Path &oldpath)
 {
 	const NodeId &targid = oldpath.targetId();
@@ -228,11 +316,17 @@ bool Node::optimizePath(const Path &oldpath)
 
 		Path hnp = hn->rtr.nearestNeighborPath(tn->id());
 		NodeId hnn = hnp.targetId();
-		Q_ASSERT(!hnn.isEmpty() && affinity(hnn, tn->id()) > aff);
+		Q_ASSERT(!hnn.isEmpty());
+		Q_ASSERT(affinity(hnn, tn->id()) > aff);
 
 		Path tnp = tn->rtr.nearestNeighborPath(hn->id());
 		NodeId tnn = tnp.targetId();
-		Q_ASSERT(!tnn.isEmpty() && affinity(tnn, hn->id()) > aff);
+		if (tnn.isEmpty()) {
+			qWarning("Optimize failed!  Bad graph?");
+			return false;
+		}
+		Q_ASSERT(!tnn.isEmpty());
+		Q_ASSERT(affinity(tnn, hn->id()) > aff);
 
 		if (hnp.weight <= tnp.weight) {
 			// Head hop is lighter - extend the head path.
@@ -249,6 +343,8 @@ bool Node::optimizePath(const Path &oldpath)
 	Q_ASSERT(tail.targetId() == targid);
 
 	Path newpath = head + tail;
+
+	//Path newpath = shortestPath(oldpath.originId(), oldpath.targetId());
 
 	if (newpath.weight >= oldpath.weight)
 		return false;	// no improvement
@@ -285,7 +381,7 @@ int main(int argc, char **argv)
 	Simulator sim;
 
 	quint32 addr = QHostAddress("1.1.1.1").toIPv4Address();
-	for (int i = 0; i < 100; i++) {
+	for (int i = 0; i < numNodes; i++) {
 
 		// Pick a pseudorandom label for this node (32 bits for now)
 		QByteArray id;
@@ -297,6 +393,7 @@ int main(int argc, char **argv)
 		// Create a node with that id
 		Node *n = new Node(&sim, id, QHostAddress(addr++));
 		nodes.insert(id, n);
+		nodelist.append(n);
 	}
 
 	// Update all nodes' neighbor reachability information

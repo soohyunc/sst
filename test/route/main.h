@@ -14,10 +14,6 @@ namespace SST {
 static const int worldWidth = 100;
 static const int worldHeight = 100;
 
-// Minimum and maximum radio range
-static const int minRange = 10;
-static const int maxRange = 20;
-
 
 class Node
 {
@@ -53,6 +49,9 @@ public:
 	/// Usable for testing purposes only and not in the actual router,
 	/// because it doesn't handle routing ids properly.
 	static Path reversePath(const Path &p);
+
+	/// Compute the shortest possible path from node a to node b.
+	static Path shortestPath(const NodeId &a, const NodeId &b);
 
 	/// Directly "force-fill" this router's neighbor tables
 	/// based on current physical and virtual neighbors.
