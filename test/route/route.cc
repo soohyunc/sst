@@ -9,7 +9,7 @@
 using namespace SST;
 
 
-static const int bucketSize = 2;
+static const int bucketSize = 5;
 
 
 int SST::affinity(const NodeId &a, const NodeId &b)
@@ -84,7 +84,7 @@ bool Path::looping() const
 	return false;
 }
 
-QDebug &operator<<(QDebug debug, const Path &p)
+QDebug operator<<(QDebug debug, const Path &p)
 {
 	debug << "Path hops" << p.numHops() << "weight" << p.weight;
 	debug.nospace() << " (" << p.start.toBase64();

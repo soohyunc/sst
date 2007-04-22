@@ -58,8 +58,12 @@ public:
 	/// Returns true if it found and inserted any new paths.
 	//bool forceFill();
 
-	bool gotAnnounce(QSet<NodeId> &visited, int aff, const Path &revpath);
-	bool sendAnnounce();
+	bool gotAnnounce(QSet<NodeId> &visited, int range,
+			int aff, const Path &revpath);
+	bool sendAnnounce(int range);
+
+	static Path squeezePath(const NodeId &origid, const NodeId &targid,
+				int prerecurse = 2, bool postrecurse = false);
 
 	bool optimizePath(const Path &oldpath);
 	bool optimize();

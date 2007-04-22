@@ -164,7 +164,7 @@ public:
 
 } // namespace SST
 
-QDebug &operator<<(QDebug debug, const SST::Path &p);
+QDebug operator<<(QDebug debug, const SST::Path &p);
 
 
 #endif	// ROUTE_H

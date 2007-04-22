@@ -11,20 +11,30 @@
 #include "sock.h"
 #include "main.h"
 #include "view.h"
+#include "stats.h"
 
 using namespace SST;
 
 
-// Number of nodes to simulate
-static const int numNodes = 100;
-
-// Minimum and maximum radio range
-static const int minRange = 10;
+#if 1	// Small network
+static const int numNodes = 100;	// Number of nodes to simulate
+static const int minRange = 10;		// Minimum and maximum radio range
 static const int maxRange = 20;
+#elif 0	// Larger, fairly dense network
+static const int numNodes = 1000;	// Number of nodes to simulate
+static const int minRange = 5;		// Minimum and maximum radio range
+static const int maxRange = 7;
+#endif
 
 
 QList<Node*> nodelist;
 QHash<QByteArray, Node*> nodes;
+
+
+static inline Node *randomNode()
+{
+	return nodelist[lrand48() % nodelist.size()];
+}
 
 
 ////////// Node //////////
@@ -85,7 +95,8 @@ void Node::updateNeighbors()
 	}
 }
 
-bool Node::gotAnnounce(QSet<NodeId> &visited, int aff, const Path &revpath)
+bool Node::gotAnnounce(QSet<NodeId> &visited, int range,
+			int aff, const Path &revpath)
 {
 	// Got a self-announcement from some other node.
 	Q_ASSERT(revpath.originId() == id());
@@ -102,6 +113,8 @@ bool Node::gotAnnounce(QSet<NodeId> &visited, int aff, const Path &revpath)
 
 	// Insert the return path into our routing table if it's useful to us.
 	bool progress = rtr.insertPath(revpath);
+	if (range-- == 0)
+		return progress;	// Don't recurse beyond range
 	if (progress) {
 
 		// The announcement proved useful to us,
@@ -122,7 +135,8 @@ bool Node::gotAnnounce(QSet<NodeId> &visited, int aff, const Path &revpath)
 					continue;	// already in path
 				Path newrev = reversePath(p) + revpath;
 				progress |= nodes[tid]->gotAnnounce(
-						visited, aff, newrev);
+						visited, range,
+						aff, newrev);
 			}
 		}
 
@@ -153,7 +167,8 @@ bool Node::gotAnnounce(QSet<NodeId> &visited, int aff, const Path &revpath)
 					continue;	// already visited
 				Path newrev = reversePath(p) + revpath;
 				progress |= nodes[tid]->gotAnnounce(
-						visited, aff+1, newrev);
+						visited, range,
+						aff+1, newrev);
 			}
 		}
 	}
@@ -161,7 +176,7 @@ bool Node::gotAnnounce(QSet<NodeId> &visited, int aff, const Path &revpath)
 	return progress;
 }
 
-bool Node::sendAnnounce()
+bool Node::sendAnnounce(int range)
 {
 	bool progress = false;
 
@@ -173,33 +188,13 @@ bool Node::sendAnnounce()
 			continue;	// don't generate paths to myself
 		Neighbor &nb = neighbors[nbid];
 		Path revpath(nbid, 0, id(), nb.dist);
-		progress |= nodes[nbid]->gotAnnounce(visited, 0, revpath);
+		progress |= nodes[nbid]->gotAnnounce(visited, range,
+							0, revpath);
 	}
 	//qDebug() << this << "announced to" << visited.size() << "nodes";
 
 	return progress;
 }
-
-#if 0
-bool Node::scan()
-{
-	if (scanq.isEmpty())
-		return false;
-	NodeId scanid = scanq.takeFirst();
-
-	// Find a path to the neighbor to scan
-	Path p(id());
-	if (scanid != id())
-		p = pathTo(scanid);
-	if (p.isNull()) {
-		qDebug() << this << "supposed to scan" << scanid.toBase64()
-			<< "but no longer in neighbor table";
-		return true;	// we at least removed it from scanq
-	}
-
-	return true;
-}
-#endif
 
 Path Node::reversePath(const Path &p)
 {
@@ -299,15 +294,40 @@ Path Node::shortestPath(const NodeId &a, const NodeId &b)
 	return reversePath(p);
 }
 
-bool Node::optimizePath(const Path &oldpath)
+Path Node::squeezePath(const NodeId &origid, const NodeId &targid,
+			int prerecurse, bool postrecurse)
 {
-	const NodeId &targid = oldpath.targetId();
-	Q_ASSERT(targid != id());
-
-	Node *hn = this;
+	Node *hn = nodes[origid];
 	Node *tn = nodes[targid];
-	Path head(id());
+	Path head(origid);
 	Path tail(targid);
+
+	// If prerecurse allows, explore several alternate paths.
+	if (hn != tn && prerecurse > 0) {
+		int aff = affinity(hn->id(), tn->id());
+
+		Path hnp = hn->rtr.nearestNeighborPath(tn->id());
+		NodeId hnn = hnp.targetId();
+		if (hnn.isEmpty())
+			return Path();	// no path found
+		Q_ASSERT(affinity(hnn, tn->id()) > aff);
+
+		Path tnp = tn->rtr.nearestNeighborPath(hn->id());
+		NodeId tnn = tnp.targetId();
+		if (tnn.isEmpty())
+			return Path();	// no path found
+		Q_ASSERT(affinity(tnn, hn->id()) > aff);
+
+		Path hp = hnp + squeezePath(hnn, targid,
+						prerecurse-1, postrecurse);
+		Path tp = squeezePath(origid, tnn, prerecurse-1, postrecurse)
+				+ reversePath(tnp);
+
+		if (tp.isNull() || hp.weight <= tp.weight)
+			return hp;
+		else
+			return tp;
+	}
 
 	// Move hn and tn toward each other, building the head and tail paths,
 	// until we reach some common midpoint node.
@@ -316,16 +336,14 @@ bool Node::optimizePath(const Path &oldpath)
 
 		Path hnp = hn->rtr.nearestNeighborPath(tn->id());
 		NodeId hnn = hnp.targetId();
-		Q_ASSERT(!hnn.isEmpty());
+		if (hnn.isEmpty())
+			return Path();	// no path found
 		Q_ASSERT(affinity(hnn, tn->id()) > aff);
 
 		Path tnp = tn->rtr.nearestNeighborPath(hn->id());
 		NodeId tnn = tnp.targetId();
-		if (tnn.isEmpty()) {
-			qWarning("Optimize failed!  Bad graph?");
-			return false;
-		}
-		Q_ASSERT(!tnn.isEmpty());
+		if (tnn.isEmpty())
+			return Path();	// no path found
 		Q_ASSERT(affinity(tnn, hn->id()) > aff);
 
 		if (hnp.weight <= tnp.weight) {
@@ -338,21 +356,51 @@ bool Node::optimizePath(const Path &oldpath)
 			tail = (reversePath(tnp) + tail);
 		}
 	}
-	Q_ASSERT(head.originId() == id());
+
+	if (postrecurse && !head.isEmpty() && !tail.isEmpty()) {
+		// Recursively squeeze the two sub-paths we ended up with
+
+		Path nhead = squeezePath(head.originId(), head.targetId(),
+					prerecurse, postrecurse);
+		if (!nhead.isNull() && nhead.weight < head.weight)
+			head = nhead;
+
+		Path ntail = squeezePath(tail.originId(), tail.targetId(),
+					prerecurse, postrecurse);
+		if (!ntail.isNull() && ntail.weight < tail.weight)
+			tail = ntail;
+	}
+
+	Q_ASSERT(head.originId() == origid);
 	Q_ASSERT(head.targetId() == tail.originId());
 	Q_ASSERT(tail.targetId() == targid);
 
-	Path newpath = head + tail;
+	return head + tail;
+}
 
+bool Node::optimizePath(const Path &oldpath)
+{
+	const NodeId &targid = oldpath.targetId();
+	Q_ASSERT(targid != id());
+
+	Path newpath = squeezePath(id(), targid);
 	//Path newpath = shortestPath(oldpath.originId(), oldpath.targetId());
+
+	if (newpath.isNull()) {
+		qWarning("optimizePath() failed!  Disconnected graph?");
+		return false;	// no path found!
+	}
+
+	Q_ASSERT(newpath.originId() == id());
+	Q_ASSERT(newpath.targetId() == targid);
 
 	if (newpath.weight >= oldpath.weight)
 		return false;	// no improvement
 
-	qDebug() << "optimized path: old weight" << oldpath.weight
-			<< "hops" << oldpath.numHops()
-			<< "new weight" << newpath.weight
-			<< "hops" << newpath.numHops();
+//	qDebug() << "optimized path: old weight" << oldpath.weight
+//			<< "hops" << oldpath.numHops()
+//			<< "new weight" << newpath.weight
+//			<< "hops" << newpath.numHops();
 
 	rtr.insertPath(newpath);
 	return true;
@@ -400,6 +448,7 @@ int main(int argc, char **argv)
 	foreach (Node *n, nodes)
 		n->updateNeighbors();
 
+#if 1
 	// Fill in nodes' neighbor buckets
 	foreach (Node *n, nodes)
 		n->scanq.append(n->id());
@@ -409,7 +458,7 @@ int main(int argc, char **argv)
 		qDebug() << "announce, round" << ++round;
 		progress = false;
 		foreach (Node *n, nodes)
-			progress |= n->sendAnnounce();
+			progress |= n->sendAnnounce(round*2);
 	} while (progress);
 
 	// Progressively optimize nodes' neighbor tables
@@ -420,6 +469,45 @@ int main(int argc, char **argv)
 		foreach (Node *n, nodes)
 			progress |= n->optimize();
 	} while (progress);
+
+	SampleStats stretchstats;
+	for (int i = 0; i < 1000; i++) {
+		// Pick two random nodes and route between them
+		Node *a = randomNode();
+		Node *b;
+		do {
+			b = randomNode();
+		} while (b == a);
+
+		Path best = Node::shortestPath(a->id(), b->id());
+		if (best.isNull()) {
+			qDebug() << "No path from" << a->id().toBase64()
+				<< "to" << b->id().toBase64();
+			continue;
+		}
+
+		Path test = Node::squeezePath(a->id(), b->id());
+		if (test.isNull()) {
+			qDebug() << "Failed to find path"
+				<< "from" << a->id().toBase64()
+				<< "to" << b->id().toBase64();
+			continue;
+		}
+
+		double stretch = test.weight / best.weight;
+
+	//	qDebug() << "Path" << a->id().toBase64()
+	//		<< "->" << b->id().toBase64()
+	//		<< "found" << test.weight << test.numHops()
+	//		<< "best" << best.weight << best.numHops()
+	//		<< "stretch" << stretch;
+
+		stretchstats.insert(stretch);
+	}
+	qDebug() << "stretch:" << stretchstats;
+
+	//exit(0);
+#endif
 
 	// Create a visualization window
 	ViewWindow *vwin = new ViewWindow();
