@@ -151,12 +151,19 @@ public:
 	// Return the current best path to a given node.
 	Path pathTo(const NodeId &id) const;
 
-	// Find the best known path to our nearest neighbor to 'id'.
+	// Find the best known path to our nearest neighbor
+	// with higher affinity with 'id' than us.
 	Path nearestNeighborPath(const NodeId &id) const;
 
 	// Return the ID of the node in our neighbor tables nearest to 'id'.
 	inline NodeId nearestNeighbor(const NodeId &id) const
 		{ return nearestNeighborPath(id).targetId(); }
+
+	// Find up to 'maxpaths' paths to neighbors with high affinity to 'id'.
+	// If the 'paths' list is nonempty on entry to this method,
+	// new paths are merged into the list incrementally.
+	void nearestNeighborPaths(const NodeId &id, QList<Path> &paths,
+				int maxpaths) const;
 
 	virtual void receive(QByteArray &msg, XdrStream &ds,
 				const SocketEndpoint &src);

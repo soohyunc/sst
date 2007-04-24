@@ -189,7 +189,54 @@ Path Router::nearestNeighborPath(const NodeId &id) const
 	const Bucket &b = buckets[aff];
 	if (b.paths.isEmpty())
 		return NodeId();
+
+#if 0
+	// Return nearest neighbor with higher affinity to 'id' than us.
 	return b.paths[0];
+#else
+	// Find neighbor(s) with highest affinity to 'id';
+	// among all such neighbors, pick the nearest one.
+	int maxi = -1;
+	int maxaff = aff;
+	double maxdist = HUGE_VAL;
+	for (int i = 0; i < b.paths.size(); i++) {
+		const Path &p = b.paths[i];
+		int naff = affinity(id, p.targetId());
+		Q_ASSERT(naff > aff);
+		if (naff > maxaff || (naff == maxaff && p.weight < maxdist)) {
+			maxi = i;
+			maxaff = naff;
+			maxdist = p.weight;
+		}
+	}
+	Q_ASSERT(maxi >= 0);
+	return b.paths[maxi];
+#endif
+}
+
+void Router::nearestNeighborPaths(const NodeId &id, QList<Path> &paths,
+				int maxpaths) const
+{
+	int aff = affinityWith(id);
+	if (aff >= buckets.size())
+		return;
+	const Bucket &b = buckets[aff];
+	for (int i = 0; i < b.paths.size(); i++) {
+		const Path &p = b.paths[i];
+		//qDebug() << "Neighbor" << i << p;
+
+		// Find the position at which to insert this path, if any
+		int j;
+		for (j = 0; j < paths.size() && p.weight <= paths[j].weight;
+				j++)
+			;
+		if (j >= maxpaths)
+			continue;
+
+		paths.insert(j, p);
+		while (paths.size() > maxpaths)
+			paths.removeLast();
+	}
 }
 
 void Router::receive(QByteArray &msg, XdrStream &ds,

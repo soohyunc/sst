@@ -16,10 +16,14 @@
 using namespace SST;
 
 
-#if 1	// Small network
+#if 0	// Small network
 static const int numNodes = 100;	// Number of nodes to simulate
 static const int minRange = 10;		// Minimum and maximum radio range
 static const int maxRange = 20;
+#elif 1	// Slightly larger network
+static const int numNodes = 300;	// Number of nodes to simulate
+static const int minRange = 5;		// Minimum and maximum radio range
+static const int maxRange = 10;
 #elif 0	// Larger, fairly dense network
 static const int numNodes = 1000;	// Number of nodes to simulate
 static const int minRange = 5;		// Minimum and maximum radio range
@@ -306,27 +310,72 @@ Path Node::squeezePath(const NodeId &origid, const NodeId &targid,
 	if (hn != tn && prerecurse > 0) {
 		int aff = affinity(hn->id(), tn->id());
 
+#if 1
+		// Pick the closest neighbor to the target from the head.
 		Path hnp = hn->rtr.nearestNeighborPath(tn->id());
 		NodeId hnn = hnp.targetId();
 		if (hnn.isEmpty())
 			return Path();	// no path found
 		Q_ASSERT(affinity(hnn, tn->id()) > aff);
 
+		// Pick the closest neighbor from the head to the target.
 		Path tnp = tn->rtr.nearestNeighborPath(hn->id());
 		NodeId tnn = tnp.targetId();
 		if (tnn.isEmpty())
 			return Path();	// no path found
 		Q_ASSERT(affinity(tnn, hn->id()) > aff);
 
+		// Recursively optimize based on either choice.
 		Path hp = hnp + squeezePath(hnn, targid,
 						prerecurse-1, postrecurse);
 		Path tp = squeezePath(origid, tnn, prerecurse-1, postrecurse)
 				+ reversePath(tnp);
 
+#if 1
+		// Pick the best.
 		if (tp.isNull() || hp.weight <= tp.weight)
 			return hp;
 		else
 			return tp;
+#else
+		// Pick the best.
+		if (tp.isNull() || hp.weight <= tp.weight) {
+			return hnp + squeezePath(hnn, targid,
+						prerecurse, postrecurse);
+		} else {
+			return squeezePath(origid, tnn,
+						prerecurse, postrecurse)
+					+ reversePath(tnp);
+		}
+#endif
+#else
+		// Pick the best 'tries' paths inward from either endpoint
+		static const int tries = 5;
+		QList<Path> paths;
+		hn->rtr.nearestNeighborPaths(tn->id(), paths, tries);
+		tn->rtr.nearestNeighborPaths(hn->id(), paths, tries);
+		if (paths.isEmpty())
+			return Path();	// no path found
+
+		// Recursively optimize based on each choice, picking the best.
+		Path best;
+		for (int i = 0; i < paths.size(); i++) {
+			Path &np = paths[i];
+			//qDebug() << "Squeeze" << i << np;
+			Path p;
+			if (np.originId() == origid)
+				p = np + squeezePath(np.targetId(), targid,
+						prerecurse-1, postrecurse);
+			else
+				p = squeezePath(origid, np.targetId(),
+						prerecurse-1, postrecurse)
+					+ reversePath(np);
+			if (best.isNull() || best.weight > p.weight)
+				best = p;
+		}
+		//qDebug() << "Best" << best;
+		return best;
+#endif
 	}
 
 	// Move hn and tn toward each other, building the head and tail paths,
@@ -506,7 +555,7 @@ int main(int argc, char **argv)
 	}
 	qDebug() << "stretch:" << stretchstats;
 
-	//exit(0);
+	exit(0);
 #endif
 
 	// Create a visualization window

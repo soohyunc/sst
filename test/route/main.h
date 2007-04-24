@@ -63,7 +63,7 @@ public:
 	bool sendAnnounce(int range);
 
 	static Path squeezePath(const NodeId &origid, const NodeId &targid,
-				int prerecurse = 2, bool postrecurse = false);
+				int prerecurse = 1, bool postrecurse = false);
 
 	bool optimizePath(const Path &oldpath);
 	bool optimize();
