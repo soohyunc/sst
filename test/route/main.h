@@ -40,6 +40,7 @@ public:
 	// Calculate our Euclidean distance from a given other node
 	double distanceTo(Node *n);
 
+	// Geographic position/neighborhood calculations for 2D mesh graphs
 	void updatePos();
 	void updateNeighbors();
 
@@ -63,7 +64,7 @@ public:
 	bool sendAnnounce(int range);
 
 	static Path squeezePath(const NodeId &origid, const NodeId &targid,
-				int prerecurse = 1, bool postrecurse = false);
+				int prerecurse = 2, bool postrecurse = false);
 
 	bool optimizePath(const Path &oldpath);
 	bool optimize();

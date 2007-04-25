@@ -16,20 +16,22 @@
 using namespace SST;
 
 
-#if 0	// Small network
+#if 1	// Small network
 static const int numNodes = 100;	// Number of nodes to simulate
 static const int minRange = 10;		// Minimum and maximum radio range
 static const int maxRange = 20;
-#elif 1	// Slightly larger network
+#elif 0	// Slightly larger network
 static const int numNodes = 300;	// Number of nodes to simulate
-static const int minRange = 5;		// Minimum and maximum radio range
-static const int maxRange = 10;
+static const int minRange = 6;		// Minimum and maximum radio range
+static const int maxRange = 12;
 #elif 0	// Larger, fairly dense network
 static const int numNodes = 1000;	// Number of nodes to simulate
 static const int minRange = 5;		// Minimum and maximum radio range
 static const int maxRange = 7;
 #endif
 
+
+Simulator sim;
 
 QList<Node*> nodelist;
 QHash<QByteArray, Node*> nodes;
@@ -471,23 +473,25 @@ bool Node::optimize()
 
 ////////// main //////////
 
-int main(int argc, char **argv)
+// Pick a random node ID that isn't already in use by another node.
+// (Always creates 32-bit node IDs for now.)
+static QByteArray randomNodeId()
 {
-	QApplication app(argc, argv);
+	QByteArray id;
+	do {
+		long lab = mrand48();
+		id = QByteArray((char*)&lab, sizeof(lab));
+	} while (nodes.contains(id));
+	return id;
+}
 
-	Simulator sim;
-
+// Create a random 2D mesh - a standard "easy" graph type,
+// and one that would work well with geographic forwarding.
+void setupRandomMesh()
+{
 	quint32 addr = QHostAddress("1.1.1.1").toIPv4Address();
 	for (int i = 0; i < numNodes; i++) {
-
-		// Pick a pseudorandom label for this node (32 bits for now)
-		QByteArray id;
-		do {
-			long lab = mrand48();
-			id = QByteArray((char*)&lab, sizeof(lab));
-		} while (nodes.contains(id));
-
-		// Create a node with that id
+		QByteArray id = randomNodeId();
 		Node *n = new Node(&sim, id, QHostAddress(addr++));
 		nodes.insert(id, n);
 		nodelist.append(n);
@@ -496,6 +500,43 @@ int main(int argc, char **argv)
 	// Update all nodes' neighbor reachability information
 	foreach (Node *n, nodes)
 		n->updateNeighbors();
+}
+
+// Create a basic high-dimensional random graph...
+// Each newly-added node connects to at least one random existing neighbor,
+// and chooses more neighbors with exponentially decreasing probability.
+void setupRandomGraph()
+{
+	PopStats degreestats;
+	quint32 addr = QHostAddress("1.1.1.1").toIPv4Address();
+	for (int i = 0; i < numNodes; i++) {
+		QByteArray id = randomNodeId();
+		Node *n = new Node(&sim, id, QHostAddress(addr++));
+		nodes.insert(id, n);
+		nodelist.append(n);
+
+		do {
+			Node *nn = randomNode();
+			if (nn == n || n->neighbors.contains(nn->id()))
+				continue;	// already have this neighbor
+
+			// Insert bidirectional neighbor link
+			Node::Neighbor newn = { 1.0, 0.0 };
+			n->neighbors.insert(nn->id(), newn);
+			nn->neighbors.insert(n->id(), newn);
+
+		} while ((lrand48() & 3) != 0);
+		degreestats.insert(n->neighbors.size());
+	}
+	qDebug() << "graph degree:" << degreestats;
+}
+
+int main(int argc, char **argv)
+{
+	QApplication app(argc, argv);
+
+	//setupRandomMesh();
+	setupRandomGraph();
 
 #if 1
 	// Fill in nodes' neighbor buckets
@@ -555,7 +596,7 @@ int main(int argc, char **argv)
 	}
 	qDebug() << "stretch:" << stretchstats;
 
-	exit(0);
+	//exit(0);
 #endif
 
 	// Create a visualization window
