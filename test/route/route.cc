@@ -47,6 +47,8 @@ int Path::hopsBefore(const NodeId &nid) const
 Path &Path::operator+=(const Path &tail)
 {
 	// The first path's target must be the second path's origin.
+	//if (targetId() != tail.originId())
+	//	qDebug() << *this << "PLUS" << tail;
 	Q_ASSERT(targetId() == tail.originId());
 
 	//Q_ASSERT(!looping());

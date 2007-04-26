@@ -328,10 +328,11 @@ Path Node::squeezePath(const NodeId &origid, const NodeId &targid,
 		Q_ASSERT(affinity(tnn, hn->id()) > aff);
 
 		// Recursively optimize based on either choice.
-		Path hp = hnp + squeezePath(hnn, targid,
-						prerecurse-1, postrecurse);
-		Path tp = squeezePath(origid, tnn, prerecurse-1, postrecurse)
-				+ reversePath(tnp);
+		Path htp = squeezePath(hnn, targid,
+					prerecurse-1, postrecurse);
+		Path hp = htp.isNull() ? Path() : hnp + htp;
+		Path thp = squeezePath(origid, tnn, prerecurse-1, postrecurse);
+		Path tp = thp.isNull() ? Path() : thp + reversePath(tnp);
 
 #if 1
 		// Pick the best.
@@ -596,7 +597,7 @@ int main(int argc, char **argv)
 	}
 	qDebug() << "stretch:" << stretchstats;
 
-	//exit(0);
+	exit(0);
 #endif
 
 	// Create a visualization window
