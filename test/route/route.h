@@ -111,7 +111,19 @@ struct Path
 class Bucket
 {
 public:
-	QList<Path> paths;
+	// Common info
+	QHash<NodeId,Path> peers; // Best paths to other nodes at this level
+
+	// Slave info
+	QList<Path> paths;	// Best paths to closest master at this level
+	QHash<NodeId,Path> mps;	// Best master path received from each peer
+	QHash<NodeId,Path> nbs; // Best paths to masters of other neighborhoods
+
+
+	inline Path masterPath() const
+		{ return paths.isEmpty() ? Path() : paths.at(0); }
+	inline NodeId masterId() const
+		{ return masterPath().targetId(); }
 
 	/// Insert a newly-discovered Path into this bucket.
 	/// Returns true if the new Path was actually accepted:

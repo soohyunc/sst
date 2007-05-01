@@ -16,11 +16,11 @@
 using namespace SST;
 
 
-#if 1	// Small network
+#if 0	// Small network
 static const int numNodes = 100;	// Number of nodes to simulate
 static const int minRange = 10;		// Minimum and maximum radio range
 static const int maxRange = 20;
-#elif 0	// Slightly larger network
+#elif 1	// Slightly larger network
 static const int numNodes = 300;	// Number of nodes to simulate
 static const int minRange = 6;		// Minimum and maximum radio range
 static const int maxRange = 12;
@@ -99,6 +99,14 @@ void Node::updateNeighbors()
 			nb.loss = 0.0;
 		}
 	}
+}
+
+void Node::computeAffinitySets()
+{
+	qDebug() << "compute affinity sets";
+	foreach (Node *a, nodelist)
+		foreach (Node *b, nodelist)
+			a->affset[affinity(a->id(), b->id())].insert(b);
 }
 
 bool Node::gotAnnounce(QSet<NodeId> &visited, int range,
@@ -200,6 +208,246 @@ bool Node::sendAnnounce(int range)
 	//qDebug() << this << "announced to" << visited.size() << "nodes";
 
 	return progress;
+}
+
+void Node::announceRoutes()
+{
+	// Fill in nodes' neighbor buckets
+	bool progress;
+	int round = 0;
+	do {
+		qDebug() << "announce, round" << ++round;
+		progress = false;
+		foreach (Node *n, nodes)
+			progress |= n->sendAnnounce(round*2);
+	} while (progress);
+
+	// Progressively optimize nodes' neighbor tables
+	round = 0;
+	do {
+		qDebug() << "optimize, round" << ++round;
+		progress = false;
+		foreach (Node *n, nodes)
+			progress |= n->optimize();
+	} while (progress);
+}
+
+bool Node::findMasters(int aff)
+{
+	Bucket &b = rtr.bucket(aff);
+
+	bool progress = false;
+	foreach (const Path &p, b.peers) {
+		NodeId tid = p.targetId();
+		int taff = rtr.affinityWith(tid);
+		Q_ASSERT(p.originId() == id());
+		Q_ASSERT(taff >= aff);
+
+		// In this phase of the route computation,
+		// we only care about nodes in their slave roles.
+		// See if the peer is a master or a fellow slave.
+		Path np;
+		if (taff == aff) {
+			// Neighbor's bit 'aff' is opposite ours -
+			// i.e., it's a master and we're a slave.
+			// Use its path as our master path candidate.
+			np = p;
+		} else {
+			// We're both slaves - find its best master path
+			// that DIDN'T come through us.
+			Bucket &nb = nodes[tid]->rtr.bucket(aff);
+			foreach (const NodeId &nbid, nb.mps.keys()) {
+				if (nbid == id())
+					continue;	// came from us
+				Path nmp = nb.mps[nbid]; // relative to tid
+				if (nmp.hopsBefore(id()) >= 0)
+					continue;	// came through us
+				nmp = p + nmp;	// make relative to us
+				if (np.isNull() || np.weight > nmp.weight)
+					np = nmp;
+			}
+		}
+
+		if (np.isNull())
+			continue;	// We found no path
+
+		Q_ASSERT(np.originId() == id());
+		Q_ASSERT(rtr.affinityWith(np.targetId()) == aff);
+
+		// Fill in the master-path slot for this peer
+		Path &mp = b.mps[tid];
+		if (mp.isNull() || mp.weight > np.weight) {
+			mp = np;
+			progress = true;
+		}
+
+		// Update our single best master-path slot
+		if (b.paths.isEmpty()) {
+			b.paths.append(np);
+			progress = true;	// Found a master-path
+		} else if (b.paths[0].weight > np.weight) {
+			b.paths[0] = np;
+			progress = true;	// Found a better master-path
+		}
+	}
+
+	return progress;
+}
+
+bool Node::findPeers(int aff)
+{
+	Bucket &b = rtr.bucket(aff);
+	Bucket &bn = rtr.bucket(aff+1);
+
+	NodeId mid = b.masterId();
+
+	bool progress = false;
+	foreach (const Path &p, b.peers) {
+		NodeId tid = p.targetId();
+		Bucket &tb = nodes[tid]->rtr.bucket(aff);
+		int taff = rtr.affinityWith(tid);
+
+		Q_ASSERT(p.originId() == id());
+		Q_ASSERT(tid != id());
+		Q_ASSERT(taff >= aff);
+
+		Path tbmp = tb.masterPath();
+		NodeId tbmid = tbmp.targetId();
+
+		// First handle this node's slave role:
+		// build a table of closest foreign masters in our b.nbs table.
+		if (taff == aff) {
+			// Target itself is a master: just use that path
+			// as long as it's not our _own_ master.
+			if (tid != mid) {
+				Path &oldp = b.nbs[tid];
+				if (oldp.isNull() || oldp.weight > p.weight) {
+					oldp = p;
+					progress = true;
+				}
+			}
+		} else if (taff > aff && tbmid == mid) {
+			// Target is a fellow slave in our own neighborhood:
+			// merge its nbs table into our own.
+			foreach (const Path &nbp, tb.nbs) {
+				NodeId nbid = nbp.targetId();
+				Q_ASSERT(rtr.affinityWith(nbid) == aff);
+				Path np = p + nbp;
+				Path &oldp = b.nbs[nbid];
+				if (oldp.isNull() || oldp.weight > np.weight) {
+					oldp = np;
+					progress = true;
+				}
+			}
+		} else if (taff > aff && !tbmp.isNull()) {
+			// Target is a fellow slave in another neighborhood:
+			// insert its master path into our nbs table.
+			Q_ASSERT(tbmid != mid);
+			Path np = p + tbmp;
+			Path &oldp = b.nbs[tbmid];
+			if (oldp.isNull() || oldp.weight > np.weight) {
+				oldp = np;
+				progress = true;
+			}
+		}
+
+		// nbs should only contain foreign masters, not our own master.
+		Q_ASSERT(!b.nbs.contains(mid));
+
+		// Now handle this node's master role:
+		// merge info from neighboring masters and slaves
+		// to form our next bucket's peers table.
+		if (taff == aff && tbmid == id()) {
+			// We're master and it's our slave.
+			// Merge its nbs table into our bn.peers table.
+			foreach (const Path &nbp, tb.nbs) {
+				NodeId nbid = nbp.targetId();
+				Q_ASSERT(nbid != id());
+				Q_ASSERT(rtr.affinityWith(nbid) > aff);
+				Path np = p + nbp;
+				Path &oldp = bn.peers[nbid];
+				if (oldp.isNull() || oldp.weight > np.weight) {
+					oldp = np;
+					progress = true;
+				}
+			}
+		} else if (taff == aff && !tbmp.isNull()) {
+			// We're master and it's someone else's slave.
+			// Merge its master path into our bn.peers table.
+			Q_ASSERT(tbmp.originId() == tid);
+			Path np = p + tbmp;
+			Path &oldp = bn.peers[tbmid];
+			if (oldp.isNull() || oldp.weight > np.weight) {
+				oldp = np;
+				progress = true;
+			}
+		} else if (taff > aff) {
+			// We're master and it's a foreign master.
+			// Merge its path directly into our bn.peers table.
+			Path &oldp = bn.peers[tid];
+			if (oldp.isNull() || oldp.weight > p.weight) {
+				oldp = p;
+				progress = true;
+			}
+		}
+	}
+
+	return progress;
+}
+
+void Node::computeRoutes()
+{
+	// Set up the level-0 routing graph
+	foreach (Node *n, nodelist) {
+		QHash<NodeId,Path> &peers = n->rtr.bucket(0).peers;
+		peers.clear();
+		foreach(NodeId nbid, n->neighbors.keys()) {
+			Neighbor &nb = n->neighbors[nbid];
+			if (nbid == n->id())
+				continue;
+			peers.insert(nbid,
+				Path(n->id(), 0/*XXX*/, nbid, nb.dist));
+		}
+		//Q_ASSERT(peers.size() == n->neighbors.size());
+	}
+
+	for (int aff = 0; ; aff++) {
+		//qDebug() << "computeRoutes(), affinity" << aff;
+
+		PopStats degreestats;
+		foreach (Node *n, nodelist)
+			degreestats.insert(n->rtr.bucket(aff).peers.size());
+		qDebug() << "affinity" << aff << "degrees:" << degreestats;
+
+		bool nonempty = false;
+
+		// First slaves gossip information about their nearest masters.
+		bool progress;
+		do {
+			//qDebug() << "findMasters()";
+			progress = false;
+			foreach (Node *n, nodelist)
+				nonempty |= progress |= n->findMasters(aff);
+		} while (progress);
+
+		// Make sure each node found a master if there was one to find.
+		foreach (Node *n, nodelist)
+			Q_ASSERT(n->affset[aff].isEmpty()
+				|| !n->rtr.bucket(aff).masterPath().isNull());
+
+		// Then everyone gossips about adjacent neighborhoods.
+		do {
+			//qDebug() << "findPeers()";
+			progress = false;
+			foreach (Node *n, nodelist)
+				nonempty |= progress |= n->findPeers(aff);
+		} while (progress);
+
+		if (!nonempty) {
+			qDebug() << "computeRoutes: max affinity" << aff;
+			break;	// Nothing more to do at this affinity
+		}
+	}
 }
 
 Path Node::reversePath(const Path &p)
@@ -508,7 +756,6 @@ void setupRandomMesh()
 // and chooses more neighbors with exponentially decreasing probability.
 void setupRandomGraph()
 {
-	PopStats degreestats;
 	quint32 addr = QHostAddress("1.1.1.1").toIPv4Address();
 	for (int i = 0; i < numNodes; i++) {
 		QByteArray id = randomNodeId();
@@ -527,8 +774,11 @@ void setupRandomGraph()
 			nn->neighbors.insert(n->id(), newn);
 
 		} while ((lrand48() & 3) != 0);
-		degreestats.insert(n->neighbors.size());
 	}
+
+	PopStats degreestats;
+	for (int i = 0; i < numNodes; i++)
+		degreestats.insert(nodelist[i]->neighbors.size());
 	qDebug() << "graph degree:" << degreestats;
 }
 
@@ -539,27 +789,11 @@ int main(int argc, char **argv)
 	//setupRandomMesh();
 	setupRandomGraph();
 
-#if 1
-	// Fill in nodes' neighbor buckets
-	foreach (Node *n, nodes)
-		n->scanq.append(n->id());
-	bool progress;
-	int round = 0;
-	do {
-		qDebug() << "announce, round" << ++round;
-		progress = false;
-		foreach (Node *n, nodes)
-			progress |= n->sendAnnounce(round*2);
-	} while (progress);
+	Node::computeAffinitySets();
 
-	// Progressively optimize nodes' neighbor tables
-	round = 0;
-	do {
-		qDebug() << "optimize, round" << ++round;
-		progress = false;
-		foreach (Node *n, nodes)
-			progress |= n->optimize();
-	} while (progress);
+#if 1
+	//Node::announceRoutes();
+	Node::computeRoutes();
 
 	SampleStats stretchstats;
 	for (int i = 0; i < 1000; i++) {
