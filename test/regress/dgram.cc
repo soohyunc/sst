@@ -31,10 +31,14 @@ DatagramTest::DatagramTest()
 			"dgram", "Datagram test protocol"))
 		qFatal("Can't listen on service name");
 
-	connect(&cli, SIGNAL(linkUp()), this, SLOT(gotLinkUp()));
+	//connect(&cli, SIGNAL(linkUp()), this, SLOT(gotLinkUp()));
 	cli.connectTo(Ident::fromIpAddress(
 				srvaddr, NETSTERIA_DEFAULT_PORT).id(),
 			"regress", "dgram");
+
+	// Push the protocol by starting to stuff datagrams in
+	// before the stream has even connected...
+	gotLinkUp();
 }
 
 void DatagramTest::gotLinkUp()
@@ -82,7 +86,8 @@ void DatagramTest::run()
 	DatagramTest test;
 	test.sim.run();
 
-	qDebug() << "Datagram test complete:" << test.narrived << "delivered";
+	qDebug() << "Datagram test complete:" << test.narrived
+		<< "of" << NDGRAMS << "delivered";
 	success = true;
 	check(test.narrived >= NDGRAMS*90/100);
 }

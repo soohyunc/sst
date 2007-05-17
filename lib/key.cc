@@ -27,6 +27,51 @@ using namespace SST;
 #define NONCELEN	SHA256_DIGEST_LENGTH
 
 
+
+////////// Checksum security setup //////////
+
+// Calculate a checksum key for TCP-grade "security".
+// Uses an analog of Bellovin's RFC 1948 for keying TCP sequence numbers.
+// We use our own host identity, including private key,
+// as the host-specific secret data to drive the key generation.
+// XX would probably be better to use some unrelated persistent random bits.
+static quint32 calcChkKey(Host *h, quint8 chanid, QByteArray peerid)
+{
+	Ident hostid = h->hostIdent();
+	Q_ASSERT(!hostid.isNull());
+	Q_ASSERT(hostid.havePrivateKey());
+	QByteArray hostkey = hostid.key(true);
+	QByteArray hosthash = Sha256::hash(hostkey);
+	Q_ASSERT(hosthash.size() == HMACKEYLEN);
+
+	// Compute a keyed hash of the local channel ID and peer's host ID
+	hmac_ctx ctx;
+	hmac_init(&ctx, (const uint8_t*)hosthash.data());
+	hmac_update(&ctx, &chanid, 1);
+	hmac_update(&ctx, peerid.data(), peerid.size());
+	quint32 ck;
+	hmac_final(&ctx, (const uint8_t*)hosthash.data(),
+			(uint8_t*)&ck, sizeof(ck));
+
+	// Finally, add the current system time in 4-microsecond increments,
+	// to ensure that packets for old channels cannot accidentally
+	// be accepted into new channels within a 4.55-hour window.
+	return ck + h->currentTime().usecs / 4;
+}
+
+// Calculate a channel ID from the local and remote checksum keys.
+// The two checksum keys must be different!
+// (Otherwise we'd get the same channel ID in both directions.)
+static QByteArray calcChkChanId(quint32 localck, quint32 remoteck)
+{
+	Q_ASSERT(localck != remoteck);
+	quint32 buf[2] = { htonl(localck), htonl(remoteck) };
+	return QByteArray((char*)&buf, sizeof(buf));
+}
+
+
+////////// Cryptographic security setup //////////
+
 static QByteArray calcSigHash(DhGroup group, int keylen,
 		const QByteArray &nhi, const QByteArray &nr,
 		const QByteArray &dhi, const QByteArray &dhr,
@@ -219,15 +264,26 @@ void KeyResponder::gotChkI1(KeyChunkChkI1Data &i1, const SocketEndpoint &src)
 	Q_ASSERT(flow->isBound());
 	Q_ASSERT(!flow->isActive());
 
+	// Compute a checksum key for our end
+	quint32 ckr = calcChkKey(h, flow->localChannel(), eidi);
+	if (ckr == i1.cki)
+		ckr++;	// Make sure it's different from cki!
+
 	// Should be no failures after this point.
-	ChecksumArmor *armor = new ChecksumArmor(i1.key, i1.key);
+	ChecksumArmor *armor = new ChecksumArmor(ckr, i1.cki);
 	flow->setArmor(armor);
+
+	// Set the channel IDs for the new stream.
+	QByteArray txchanid = calcChkChanId(ckr, i1.cki);
+	QByteArray rxchanid = calcChkChanId(i1.cki, ckr);
+	flow->setChannelIds(txchanid, rxchanid);
 
 	// Build, send, XXX and cache our R1 response.
 	KeyChunk ch;
 	KeyChunkUnion &chu = ch.alloc();
 	chu.type = KeyChunkChkR1;
-	chu.chkr1.key = i1.key;
+	chu.chkr1.cki = i1.cki;
+	chu.chkr1.ckr = ckr;
 	chu.chkr1.chanr = flow->localChannel();
 	chu.chkr1.ulpr = ulpr;
 	QByteArray r2pkt = send(magic(), ch, src);
@@ -235,7 +291,7 @@ void KeyResponder::gotChkI1(KeyChunkChkI1Data &i1, const SocketEndpoint &src)
 
 	// Let the ball roll
 	flow->setRemoteChannel(i1.chani);
-	flow->start();
+	flow->start(false);
 }
 
 
@@ -263,8 +319,7 @@ QByteArray KeyResponder::calcDhCookie(DHKey *hk,
 
 void KeyResponder::gotDhI1(KeyChunkDhI1Data &i1, const SocketEndpoint &src)
 {
-	qDebug("got DhI1 from %s:%d",
-		src.addr.toString().toAscii().data(), src.port);
+	qDebug() << this << "got DhI1 from" << src.addr.toString() << src.port;
 
 	// Find or generate the appropriate host key
 	DHKey *hk = h->getDHKey(i1.group);
@@ -297,7 +352,7 @@ void KeyResponder::gotDhI1(KeyChunkDhI1Data &i1, const SocketEndpoint &src)
 
 void KeyResponder::gotDhI2(KeyChunkDhI2Data &i2, const SocketEndpoint &src)
 {
-	qDebug("got DhI2");
+	qDebug() << this << "got DhI2";
 
 	// We'll need the originator's hashed nonce as well...
 	QByteArray nhi = Sha256::hash(i2.ni);
@@ -372,9 +427,9 @@ void KeyResponder::gotDhI2(KeyChunkDhI2Data &i2, const SocketEndpoint &src)
 	}
 
 	// Verify the initiator's identity
-	qDebug() << "eidi" << kii.eidi.toBase64()
-		<< "idpki" << kii.idpki.toBase64()
-		<< "sigi" << kii.sigi.toBase64();
+	//qDebug() << "eidi" << kii.eidi.toBase64()
+	//	<< "idpki" << kii.idpki.toBase64()
+	//	<< "sigi" << kii.sigi.toBase64();
 	Ident identi(kii.eidi);
 	if (!identi.setKey(kii.idpki)) {
 		qDebug("Received I2 with bad initiator public key");
@@ -451,9 +506,14 @@ void KeyResponder::gotDhI2(KeyChunkDhI2Data &i2, const SocketEndpoint &src)
 	AESArmor *armor = new AESArmor(txenckey, txmackey, rxenckey, rxmackey);
 	flow->setArmor(armor);
 
+	// Set up the new flow's channel IDs
+	QByteArray txchanid = calcKey(master, i2.nr, nhi, 'I', 128/8);
+	QByteArray rxchanid = calcKey(master, nhi, i2.nr, 'I', 128/8);
+	flow->setChannelIds(txchanid, rxchanid);
+
 	// Let the ball roll
 	flow->setRemoteChannel(kii.chani);
-	flow->start();
+	flow->start(false);
 }
 
 bool KeyResponder::checkInitiator(const SocketEndpoint &,
@@ -475,8 +535,10 @@ KeyInitiator::KeyInitiator(Flow *fl, quint32 magic,
 	dhgroup(dhgroup ? dhgroup : KEYGROUP_JFDH_DEFAULT),
 	keylen(128/8),
 	state(I1),
+	early(true),
 	txtimer(fl->host())
 {
+	qDebug() << this << "initiating to" << sepr;
 	Q_ASSERT(fl->isBound());
 	Q_ASSERT(!fl->isActive());
 	fl->setParent(this);
@@ -501,11 +563,15 @@ KeyInitiator::KeyInitiator(Flow *fl, quint32 magic,
 
 	// Checksum key agreement state
 	if (methods & KEYMETH_CHK) {
-		do {
-			// XX should probably treat a few bits as a counter
-			QByteArray chkbuf = randBytes(4);
-			memcpy(&chkkey, chkbuf.data(), 4);
-		} while (h->initchks.contains(KeyEpChk(sepr, chkkey)));
+		// Compute a legacy identity for the responder
+		Ident identr = Ident::fromIpAddress(sepr.addr, sepr.port);
+		QByteArray eidr = identr.id();
+
+		// Calculate an appropriate time-based checksum key,
+		// making sure it's not already in use (however unlikely).
+		chkkey = calcChkKey(h, fl->localChannel(), eidr);
+		while (h->initchks.contains(KeyEpChk(sepr, chkkey)))
+			chkkey++;
 		h->initchks.insert(KeyEpChk(sepr, chkkey), this);
 	}
 
@@ -531,18 +597,25 @@ KeyInitiator::KeyInitiator(Flow *fl, quint32 magic,
 
 KeyInitiator::~KeyInitiator()
 {
-	if (methods & KEYMETH_CHK) {
-		Q_ASSERT(h->initchks[KeyEpChk(sepr, chkkey)] == this);
+	qDebug() << this << "~KeyInitiator";
+	cancel();
+}
+
+void
+KeyInitiator::cancel()
+{
+	//qDebug() << this << "done initiating to" << sepr;
+
+	if ((methods & KEYMETH_CHK) &&
+			h->initchks.value(KeyEpChk(sepr, chkkey)) == this)
 		h->initchks.remove(KeyEpChk(sepr, chkkey));
-	}
 
-	if (methods & KEYMETH_AES) {
-		Q_ASSERT(h->initnhis[nhi] == this);
+	if ((methods & KEYMETH_AES) &&
+			h->initnhis.value(nhi) == this)
 		h->initnhis.remove(nhi);
-	}
 
-	Q_ASSERT(h->initeps[sepr] == this);
-	h->initeps.remove(sepr);
+	if (h->initeps.value(sepr) == this)
+		h->initeps.remove(sepr);
 }
 
 void
@@ -557,7 +630,7 @@ KeyInitiator::gotR0(Host *h, const Endpoint &src)
 void
 KeyInitiator::sendI1()
 {
-	qDebug() << "send I1 to " << sepr.toString();
+	qDebug() << this << "send I1 to " << sepr.toString();
 	state = I1;
 
 	// Build a message containing an I1 chunk
@@ -569,11 +642,14 @@ KeyInitiator::sendI1()
 		KeyChunk ch;
 		KeyChunkUnion &chu(ch.alloc());
 		chu.type = KeyChunkChkI1;
-		chu.chki1.key = chkkey;
+		chu.chki1.cki = chkkey;
 		chu.chki1.chani = fl->localChannel();
 		chu.chki1.cookie = cookie;
 		chu.chki1.ulpi = ulpi;
 		msg.chunks.append(ch);
+
+		// ChkI1 might create receiver state as a result of first msg!
+		early = false;
 	}
 
 	// I1 chunk for AES encryption with DH key agreement.
@@ -615,16 +691,16 @@ KeyInitiator::gotChkR1(Host *h, KeyChunkChkR1Data &r1,
 		src.addr.toString().toAscii().data(), src.port);
 
 	// Lookup the Initiator based on the received checksum key
-	KeyInitiator *i = h->initchks.value(KeyEpChk(src, r1.key));
+	KeyInitiator *i = h->initchks.value(KeyEpChk(src, r1.cki));
 	if (i == NULL)
 		return qDebug("Got ChkR1 for unknown I1");
 	if (i->isDone())
 		return qDebug("Got duplicate ChkR1 for completed initiator");
-	Q_ASSERT(i->chkkey == r1.key);
+	Q_ASSERT(i->chkkey == r1.cki);
 	Q_ASSERT(i->fl != NULL);
 
 	// If responder's channel is zero, send another I1 with the cookie.
-	if (r1.chanr == 0) {
+	if (r1.ckr == r1.cki || r1.chanr == 0) {
 		if (r1.cookie.isEmpty())
 			return qDebug("ChkR1 with no chanr and no cookie!?");
 		i->cookie = r1.cookie;
@@ -632,26 +708,29 @@ KeyInitiator::gotChkR1(Host *h, KeyChunkChkR1Data &r1,
 	}
 
 	// Set up the new flow's armor
-	i->fl->setArmor(new ChecksumArmor(i->chkkey, i->chkkey));
+	i->fl->setArmor(new ChecksumArmor(i->chkkey, r1.ckr));
+
+	// Set the channel IDs for the new stream.
+	QByteArray txchanid = calcChkChanId(i->chkkey, r1.ckr);
+	QByteArray rxchanid = calcChkChanId(r1.ckr, i->chkkey);
+	i->fl->setChannelIds(txchanid, rxchanid);
 
 	// Finish flow setup
 	i->fl->setRemoteChannel(r1.chanr);
 
 	// Our job is done
-	qDebug("Key exchange completed!");
+	qDebug() << i << "key exchange completed!";
 	i->state = Done;
 	i->txtimer.stop();
 
 	// Let the ball roll...
-	i->fl->start();
+	i->fl->start(true);
 	i->completed(true);
 }
 
 void
 KeyInitiator::gotDhR1(Host *h, KeyChunkDhR1Data &r1)
 {
-	qDebug("got ChkR1");
-
 	// Lookup the Initor based on the received nhi
 	KeyInitiator *i = h->initnhis.value(r1.nhi);
 	if (i == NULL || i->state == Done || i->dhgroup != r1.group)
@@ -660,6 +739,8 @@ KeyInitiator::gotDhR1(Host *h, KeyChunkDhR1Data &r1)
 		return qDebug("Got duplicate DhR1 for completed initiator");
 	Q_ASSERT(i->nhi == r1.nhi);
 	Q_ASSERT(i->fl != NULL);
+
+	qDebug() << i << "got DhR1";
 
 	// Validate the responder's group number
 	if (r1.group > KEYGROUP_JFDH_MAX)
@@ -717,9 +798,9 @@ KeyInitiator::gotDhR1(Host *h, KeyChunkDhR1Data &r1)
 	kii.idpki = hi.key();
 	kii.sigi = sigi;
 	kii.ulpi = i->ulpi;
-	qDebug() << "eidi" << kii.eidi.toBase64()
-		<< "idpki" << kii.idpki.toBase64()
-		<< "sigi" << kii.sigi.toBase64();
+	//qDebug() << "eidi" << kii.eidi.toBase64()
+	//	<< "idpki" << kii.idpki.toBase64()
+	//	<< "sigi" << kii.sigi.toBase64();
 	QByteArray encidi;
 	XdrStream wds(&encidi, QIODevice::WriteOnly);
 	wds << kii;
@@ -748,8 +829,11 @@ KeyInitiator::gotDhR1(Host *h, KeyChunkDhR1Data &r1)
 void
 KeyInitiator::sendDhI2()
 {
-	qDebug("send DhI2");
+	qDebug() << this << "send DhI2";
 	state = I2;
+
+	// Once the receiver gets this message, it'll create flow state.
+	early = false;
 
 	// Send the I2 message
 	KeyChunk ch;
@@ -769,8 +853,6 @@ KeyInitiator::sendDhI2()
 void
 KeyInitiator::gotDhR2(Host *h, KeyChunkDhR2Data &r2)
 {
-	qDebug("got DhR2");
-
 	// Lookup the Initiator based on the received nhi
 	KeyInitiator *i = h->initnhis.value(r2.nhi);
 	if (i == NULL || i->state != I2)
@@ -781,6 +863,8 @@ KeyInitiator::gotDhR2(Host *h, KeyChunkDhR2Data &r2)
 		return;	// Haven't received an R1 response yet!
 	Q_ASSERT(i->nhi == r2.nhi);
 	Q_ASSERT(i->fl != NULL);
+
+	qDebug() << i << "got DhR2";
 
 	// Make sure our host key hasn't expired in the meantime
 	// XXX but reverting here leaves the responder with a hung channel!
@@ -838,6 +922,11 @@ KeyInitiator::gotDhR2(Host *h, KeyChunkDhR2Data &r2)
 	QByteArray rxmackey = calcKey(i->master, i->nr, i->nhi, 'A', 256/8);
 	i->fl->setArmor(new AESArmor(txenckey, txmackey, rxenckey, rxmackey));
 
+	// Set up the new flow's channel IDs
+	QByteArray txchanid = calcKey(i->master, i->nhi, i->nr, 'I', 128/8);
+	QByteArray rxchanid = calcKey(i->master, i->nr, i->nhi, 'I', 128/8);
+	i->fl->setChannelIds(txchanid, rxchanid);
+
 	// Finish flow setup
 	i->fl->setRemoteChannel(kir.chanr);
 
@@ -847,7 +936,7 @@ KeyInitiator::gotDhR2(Host *h, KeyChunkDhR2Data &r2)
 	i->txtimer.stop();
 
 	// Let the ball roll...
-	i->fl->start();
+	i->fl->start(true);
 	i->completed(true);
 }
 

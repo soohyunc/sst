@@ -2,6 +2,7 @@
 #define SST_STRM_BASE_H
 
 #include <QQueue>
+#include <QPointer>
 
 #include "stream.h"
 #include "strm/abs.h"
@@ -11,6 +12,59 @@ namespace SST {
 class Stream;
 class StreamFlow;
 class StreamPeer;
+class BaseStream;
+
+
+// Helper struct representing an attachment point on a stream
+// where the stream attaches to a flow/channel.
+struct StreamAttachment : public StreamProtocol {
+	BaseStream	*strm;		// Stream we're a part of
+	StreamFlow	*flow;		// Flow we're attached to
+	StreamId	sid;		// Stream ID in flow
+	//quint64	initseq;	// PktSeq of first Init
+	quint64		sidseq;		// Reference PktSeq for SID
+
+	inline StreamAttachment() { flow = NULL; }
+};
+
+struct StreamTxAttachment : public StreamAttachment
+{
+	bool		active;		// Currently active and usable
+	bool		deprecated;	// Opening a replacement channel
+
+	inline StreamTxAttachment() { active = deprecated = false; }
+
+	inline bool isInUse() { return flow != NULL; }
+	inline bool isAcked() { return sidseq != maxPacketSeq; }
+	inline bool isActive() { return active; }
+	inline bool isDeprecated() { return deprecated; }
+
+	// Transition from Unused to Attaching -
+	// this happens when we send a first Init, Reply, or Attach packet.
+	void setAttaching(StreamFlow *flow, quint16 sid);
+
+	// Transition from Attaching to Active -
+	// this happens when we get an Ack to our Init, Reply, or Attach.
+	inline void setActive(PacketSeq rxseq) {
+		Q_ASSERT(isInUse() && !isAcked());
+		this->sidseq = rxseq;
+		this->active = true;
+	}
+
+	// Transition to the unused state.
+	void clear();
+};
+
+struct StreamRxAttachment : public StreamAttachment
+{
+	inline bool isActive() { return flow != NULL; }
+
+	// Transition from unused to active.
+	void setActive(StreamFlow *flow, quint16 sid, PacketSeq rxseq);
+
+	// Transition to the unused state.
+	void clear();
+};
 
 
 /** @internal Basic internal stream control object.
@@ -31,15 +85,17 @@ class BaseStream : public AbstractStream
 	friend class Stream;
 	friend class StreamFlow;
 	friend class StreamPeer;
+	friend class StreamTxAttachment;
+	friend class StreamRxAttachment;
 	Q_OBJECT
 
 private:
 	enum State {
-		Disconnected = 0,
-		WaitFlow,		// Initiating, waiting for flow
+		Fresh = 0,		// Newly created
 		WaitService,		// Initiating, waiting for svc reply
 		Accepting,		// Accepting, waiting for svc request
-		Connected,
+		Connected,		// Connection established
+		Disconnected		// Connection terminated
 	};
 
 	struct Packet {
@@ -48,11 +104,15 @@ private:
 		qint64 tsn;			// Logical byte position
 		QByteArray buf;			// Packet buffer incl. headers
 		int hdrlen;			// Size of flow + stream hdrs
-		bool dgram;			// Is an unreliable datagram
+		PacketType type;		// Type of packet
 
-		inline Packet() { strm = NULL; }
+		inline Packet() : strm(NULL), type(InvalidPacket) { }
+		inline Packet(BaseStream *strm, PacketType type)
+			: strm(strm), type(type) { }
 
 		inline bool isNull() const { return strm == NULL; }
+		inline int payloadSize() const
+			{ return buf.size() - hdrlen; }
 	};
 
 	struct RxSegment {
@@ -75,20 +135,33 @@ private:
 			{ return flags() != 0; }
 	};
 
+	typedef StreamAttachment Attachment;
+	typedef StreamTxAttachment TxAttachment;
+	typedef StreamRxAttachment RxAttachment;
+
+
 	// Connection state
+	StreamPeer	*peer;			// Our peer, if usid not Null
+	UniqueStreamId	usid;			// Our UniqueStreamId, or null
+	UniqueStreamId	pusid;			// Parent's UniqueStreamId
+	QPointer<BaseStream> parent;		// Parent, if it still exists
 	State		state;
-	StreamFlow	*flow;			// Flow we're attached to
-	BaseStream	*parent;		// Parent if non-root
-			// XXX what if child outlives?
-	StreamID	sid;			// Stream ID if Connected
-	bool		mature;			// Seen at least one round-trip
+	bool		init;			// Initiating, not yet acked
+	bool		toplev;			// This is a top-level stream
+	//bool		mature;			// Seen at least one round-trip
 	bool		endread;		// Seen or forced EOF on read
 	bool		endwrite;		// We've written our EOF marker
+
+	// Flow attachment state
+	TxAttachment	tatt[maxAttach];	// Our channel attachments
+	RxAttachment	ratt[maxAttach];	// Peer's channel attachments
+	TxAttachment	*tcuratt;		// Current transmit-attachment
 
 	// Transmit state
 	qint32		tsn;			// Next SSN to transmit
 	qint32		twin;			// Transmit window size
-	QQueue<Packet>	tqueue;			// Waiting to be transmitted
+	QQueue<Packet>	tqueue;			// Packets to be transmitted
+	bool		tqflow;			// We're on flow's tx queue
 
 	// Byte-stream receive state
 	qint64		ravail;			// Received bytes available
@@ -104,26 +177,57 @@ private:
 
 
 private:
-	void connectToFlow(StreamFlow *flow);
+	// Clear out this stream's state as if preparing for deletion,
+	// without actually deleting the object yet.
+	void clear();
+
+	// Connection
 	void gotServiceReply();
 	void gotServiceRequest();
 
+	// Actively initiate a transmit-attachment
+	void tattach();
+	void setUsid(const UniqueStreamId &usid);
+
+	// Data transmission
 	void txqueue(const Packet &pkt);
-	void txPrepare(Packet &pkt, StreamFlow *flow);
+	void txenqflow();
+	//void txPrepare(Packet &pkt, StreamFlow *flow);
+	void transmit(StreamFlow *flow);
+	void txAttachData(PacketType type, StreamId refsid);
+	void txData(Packet &p);
+	void txDatagram(Packet &p);
+	void txAttach();
+	static void txReset(StreamFlow *flow, quint16 sid, quint8 flags);
 
-	BaseStream *rxinit(StreamID nsid);
-	void rxSegment(RxSegment &rseg);
+	// Data reception
+	static bool receive(qint64 pktseq, QByteArray &pkt, StreamFlow *flow);
+	static bool rxInitPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow);
+	static bool rxReplyPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow);
+	static bool rxDataPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow);
+	static bool rxDatagramPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow);
+	static bool rxAckPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow);
+	static bool rxResetPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow);
+	static bool rxAttachPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow);
+	static bool rxDetachPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow);
+	void rxData(QByteArray &pkt, quint32 byteseq);
 
-	// Packet receive methods called from StreamFlow
-	void rxInitPacket(const QByteArray &pkt);
-	void rxDataPacket(const QByteArray &pkt);
-	void rxDatagramPacket(const QByteArray &pkt);
-	void rxResetPacket(const QByteArray &pkt);
+	BaseStream *rxSubstream(quint64 pktseq, StreamFlow *flow,
+				quint16 sid, unsigned slot,
+				const UniqueStreamId &usid);
 
 	// StreamFlow calls these to return our transmitted packets to us
 	// after being held in ackwait.
-	void acked(const Packet &pkt);
-	void missed(const Packet &pkt);
+	void acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq);
+	void missed(StreamFlow *flow, const Packet &pkt);
 
 	// Disconnect and set an error condition.
 	void fail(const QString &err);
@@ -136,17 +240,28 @@ private slots:
 	// via the parent stream's readyReadDatagram() signal.
 	void subReadMessage();
 
+	// We connect this signal to our StreamPeer's flowConnected()
+	// while waiting for a flow to attach to.
+	void gotFlowConnected();
+
+	// We connect this signal to our parent stream's attached() signal
+	// while we're waiting for it to attach so we can init.
+	void gotParentAttached();
+
 
 public:
-	BaseStream(Host *host);
-	virtual ~BaseStream();
-
-	/** Connect to a given service on a remote host.
-	 * @param dstid the endpoint identifier (EID)
-	 *		of the desired remote host to connect to.
+	/** Create a BaseStream instance.
+	 * @param peerid the endpoint identifier (EID) of the remote host
+	 *		with which this stream will be used to communicate.
 	 *		The destination may be either a cryptographic EID
 	 * 		or a non-cryptographic legacy address
 	 *		as defined by the Ident class.
+	 * @param parent the parent stream, or NULL if none (yet).
+	 */
+	BaseStream(Host *host, QByteArray peerid, BaseStream *parent);
+	virtual ~BaseStream();
+
+	/** Connect to a given service on a remote host.
 	 * @param service the service name to connect to on the remote host.
 	 *		This parameter replaces the port number
 	 *		that TCP traditionally uses to differentiate services.
@@ -162,8 +277,7 @@ public:
 	 *		if the dstid is a non-cryptographic legacy address.
 	 * @see Ident
 	 */
-	void connectTo(const QByteArray &dstid,
-			const QString &service, const QString &protocol,
+	void connectTo(const QString &service, const QString &protocol,
 			const Endpoint &dstep = Endpoint());
 
 	/// Returns true if the underlying link is currently connected
@@ -217,7 +331,14 @@ public:
 
 
 signals:
+	// A complete message has been received.
 	void readyReadMessage();
+
+	// An active attachment attempt succeeded and was acked by receiver.
+	void attached();
+
+	// An active detachment attempt succeeded and was acked by receiver.
+	void detached();
 };
 
 } // namespace SST

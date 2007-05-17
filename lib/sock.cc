@@ -199,6 +199,8 @@ bool SocketFlow::bind(Socket *sock, const Endpoint &dst, Channel chan)
 	if (sock->flow(dst, chan) != NULL)
 		return false;		// Already in use
 
+	//qDebug() << this << "bind" << dst << "chan" << chan << "to" << sock;
+
 	// Bind us to this socket and channel
 	this->sock = sock;
 	remoteep.addr = dst.addr;
@@ -209,7 +211,7 @@ bool SocketFlow::bind(Socket *sock, const Endpoint &dst, Channel chan)
 	return true;
 }
 
-void SocketFlow::start()
+void SocketFlow::start(bool)
 {
 	Q_ASSERT(remotechan);
 
@@ -227,6 +229,7 @@ void SocketFlow::unbind()
 	Q_ASSERT(!active);
 
 	if (sock) {
+		//qDebug() << this << "unbind from sock" << sock;
 		QPair<Endpoint,Channel> p(remoteep, localchan);
 		Q_ASSERT(sock->flows.value(p) == this);
 		sock->flows.remove(p);

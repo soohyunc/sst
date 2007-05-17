@@ -6,20 +6,30 @@
 #include <QQueue>
 
 #include "../flow.h"	// XXX
-#include "strm/proto.h"
+#include "strm/base.h"
 
 namespace SST {
 
-class BaseStream;
 class StreamPeer;
 class StreamResponder;
+class StreamAttachment;
+class StreamTxAttachment;
+class StreamRxAttachment;
 
 class StreamFlow : public Flow, public StreamProtocol
 {
 	friend class BaseStream;
 	friend class StreamPeer;
 	friend class StreamResponder;
+	friend class StreamTxAttachment;
+	friend class StreamRxAttachment;
+	Q_OBJECT
 
+	typedef StreamAttachment Attachment;
+	typedef StreamTxAttachment TxAttachment;
+	typedef StreamRxAttachment RxAttachment;
+
+private:
 	// StreamPeer this flow is associated with.
 	// A StreamFlow is always either a direct child of its StreamPeer,
 	// or a child of a KeyInitiator which is a child of its StreamPeer,
@@ -30,19 +40,22 @@ class StreamFlow : public Flow, public StreamProtocol
 	BaseStream root;
 
 	// Hash table of active streams indexed by stream ID
-	QHash<StreamID, BaseStream*> idhash;	// Stream ID -> BaseStream
-	StreamID nextsid;			// Next StreamID to use
+	QHash<StreamId, TxAttachment*> txsids;	// Our SID namespace
+	QHash<StreamId, RxAttachment*> rxsids;	// Peer's SID namespace
+	StreamCtr txctr;			// Next StreamCtr to assign
+	StreamCtr txackctr;			// Last StreamCtr acknowledged
+	StreamCtr rxctr;			// Last StreamCtr received
 
 	// List of closed stream IDs waiting for close acknowledgment
-	QList<StreamID> closed;
+	QList<StreamId> closed;
 
 	// Round-robin queue of Streams with packets waiting to transmit
 	// XX would prefer a smarter scheduling algorithm, e.g., stride.
 	QQueue<BaseStream*> tstreams;
 
-//	// Packets transmitted and waiting for acknowledgment,
-//	// inserted and kept in order of txseq.
-//	QQueue<BaseStream::Packet> ackqueue;
+//	// Round-robin queue of TxAttachments waiting to transmit
+//	// XX would prefer a smarter scheduling algorithm, e.g., stride.
+//	QQueue<TxAttachment*> tattq;
 
 	// Packets transmitted and waiting for acknowledgment,
 	// indexed by assigned transmit sequence number.
@@ -50,8 +63,8 @@ class StreamFlow : public Flow, public StreamProtocol
 
 
 	// Attach a stream to this flow, allocating a SID for it if necessary.
-	StreamID attach(BaseStream *bs, StreamID sid = 0);
-	void detach(BaseStream *bs);
+	//StreamId attach(BaseStream *bs, StreamId sid = 0);
+	//void detach(BaseStream *bs);
 
 	StreamFlow(Host *h, StreamPeer *peer, const QByteArray &peerid);
 	~StreamFlow();
@@ -62,14 +75,25 @@ class StreamFlow : public Flow, public StreamProtocol
 		{ return tstreams.removeAll(strm); }
 	void enqueueStream(BaseStream *strm);
 
-	virtual void readyTransmit();
-	virtual void flowReceive(qint64 rxseq, QByteArray &pkt);
-	virtual void acked(qint64 txseq, int npackets);
-	virtual void missed(qint64 txseq, int npackets);
-	virtual void failed();
+	// Detach all streams currently transmit-attached to this stream,
+	// and send any of their outstanding packets back for retransmission.
+	void detachAll();
 
-	virtual void start();
+	// Override Flow's default transmitAck() method
+	// to include stream-layer info in explicit ack packets.
+	virtual bool transmitAck(QByteArray &pkt,
+				quint64 ackseq, unsigned ackct);
+
+	virtual void readyTransmit();
+	virtual bool flowReceive(qint64 rxseq, QByteArray &pkt);
+	virtual void acked(quint64 txseq, int npackets, quint64 rxseq);
+	virtual void missed(quint64 txseq, int npackets);
+
+	virtual void start(bool initiator);
 	virtual void stop();
+
+private slots:
+	void gotLinkStatusChanged(LinkStatus newstatus);
 };
 
 } // namespace SST

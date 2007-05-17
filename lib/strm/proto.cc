@@ -1,6 +1,7 @@
 
 #include <QtDebug>
 
+#include "os.h"
 #include "proto.h"
 
 using namespace SST;
@@ -11,11 +12,11 @@ using namespace SST;
 const quint32 StreamProtocol::magic;
 const int StreamProtocol::mtu;
 
-const unsigned StreamProtocol::hdrlenInit;
-const unsigned StreamProtocol::hdrlenReply;
-const unsigned StreamProtocol::hdrlenData;
-const unsigned StreamProtocol::hdrlenDatagram;
-const unsigned StreamProtocol::hdrlenReset;
+const int StreamProtocol::hdrlenInit;
+const int StreamProtocol::hdrlenReply;
+const int StreamProtocol::hdrlenData;
+const int StreamProtocol::hdrlenDatagram;
+const int StreamProtocol::hdrlenReset;
 
 const unsigned StreamProtocol::typeBits;
 const unsigned StreamProtocol::typeMask;
@@ -31,7 +32,9 @@ const quint8 StreamProtocol::dataCloseFlag;
 const quint8 StreamProtocol::dgramBeginFlag;
 const quint8 StreamProtocol::dgramEndFlag;
 
-const StreamProtocol::StreamID StreamProtocol::sidOrigin;
-const StreamProtocol::StreamID StreamProtocol::sidRoot;
+const StreamId StreamProtocol::sidRoot;
+
+const int StreamProtocol::maxAttach;
+const int StreamProtocol::maxSidSkip;
 
 

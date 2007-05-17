@@ -4,9 +4,46 @@
 #include <QPair>
 
 #include "flow.h"
+#include "xdr.h"
 
 
 namespace SST {
+
+
+// A few types in the main SST scope
+typedef quint16 StreamId;		// Stream ID within channel
+typedef quint32 StreamSeq;		// Stream byte sequence number
+typedef quint64 StreamCtr;		// Counter for SID assignment
+
+
+// Unique stream identifier - identifiers streams across channels
+// XX should contain a "method identifier" of some kind?
+// XX also, perhaps a more compact encoding than plain XDR?
+struct UniqueStreamId {
+	StreamCtr streamCtr;		// Stream counter in channel
+	QByteArray chanId;		// Unique channel+direction ID
+
+	inline UniqueStreamId() { chanId.clear(); streamCtr = 0; }
+	inline UniqueStreamId(StreamCtr streamCtr, QByteArray chanId)
+		: streamCtr(streamCtr), chanId(chanId) { }
+
+	inline bool isNull() const { return chanId.isNull(); }
+
+	inline bool operator==(const UniqueStreamId &o) const
+		{ return streamCtr == o.streamCtr && chanId == o.chanId; }
+};
+
+inline XdrStream &operator<<(XdrStream &xs, const UniqueStreamId &usid)
+	{ xs << usid.streamCtr << usid.chanId; return xs; }
+inline XdrStream &operator>>(XdrStream &xs, UniqueStreamId &usid)
+	{ xs >> usid.streamCtr >> usid.chanId; return xs; }
+
+inline QDebug &operator<<(QDebug &debug, const UniqueStreamId &usid) {
+	debug.nospace() << "USID[" << usid.chanId.toBase64()
+		<< ":" << usid.streamCtr << "]";
+	return debug.space();
+}
+
 
 
 /** @internal SST stream protocol definitions.
@@ -28,11 +65,14 @@ public:
 	static const int maxStatelessDatagram = mtu * 4;
 
 	// Sizes of various stream header types
-	static const unsigned hdrlenInit		= Flow::hdrlen + 8;
-	static const unsigned hdrlenReply		= Flow::hdrlen + 8;
-	static const unsigned hdrlenData		= Flow::hdrlen + 8;
-	static const unsigned hdrlenDatagram		= Flow::hdrlen + 4;
-	static const unsigned hdrlenReset		= Flow::hdrlen + 4;
+	static const int hdrlenMin		= Flow::hdrlen + 4;
+	static const int hdrlenInit		= Flow::hdrlen + 8;
+	static const int hdrlenReply		= Flow::hdrlen + 8;
+	static const int hdrlenData		= Flow::hdrlen + 8;
+	static const int hdrlenDatagram		= Flow::hdrlen + 4;
+	static const int hdrlenReset		= Flow::hdrlen + 4;
+	static const int hdrlenAttach		= Flow::hdrlen + 4;
+	static const int hdrlenAck		= Flow::hdrlen + 4;
 
 	// Header layouts
 	struct StreamHeader {
@@ -57,9 +97,10 @@ public:
 		ReplyPacket	= 0x2,		// Reply to new stream
 		DataPacket	= 0x3,		// Regular data packet
 		DatagramPacket	= 0x4,		// Best-effort datagram
-		ResetPacket	= 0x5,		// Reset stream
-		AttachPacket	= 0x6,		// Attach stream
-		DetachPacket	= 0x7,		// Detach stream
+		AckPacket	= 0x5,		// Explicit acknowledgment
+		ResetPacket	= 0x6,		// Reset stream
+		AttachPacket	= 0x7,		// Attach stream
+		DetachPacket	= 0x8,		// Detach stream
 	};
 
 	// The Window field consists of some flags and a 5-bit exponent.
@@ -71,7 +112,7 @@ public:
 	static const unsigned winExpShift	= 0;
 
 	struct InitHeader : public StreamHeader {
-		quint16 nsid;			// New Stream ID
+		quint16 rsid;			// New Stream ID
 		quint16 tsn;			// 16-bit transmit seq no
 	};
 	typedef InitHeader ReplyHeader;
@@ -81,7 +122,10 @@ public:
 	};
 
 	typedef StreamHeader DatagramHeader;
+	typedef StreamHeader AckHeader;
 	typedef StreamHeader ResetHeader;
+	typedef StreamHeader AttachHeader;
+	typedef StreamHeader DetachHeader;
 
 
 	// Subtype/flag bits for Init, Reply, and Data packets
@@ -94,22 +138,16 @@ public:
 	static const quint8 dgramBeginFlag	= 0x2;	// First fragment
 	static const quint8 dgramEndFlag	= 0x1;	// Last fragment
 
+	// Flag bits for Attach packets
+	static const quint8 attachInitFlag	= 0x8;	// Initiate stream
+	static const quint8 attachSlotMask	= 0x1;	// Slot to use
 
-	// Other types
-	typedef quint16 StreamID;		// Stream ID
-	typedef quint32 StreamSeq;		// Stream byte sequence number
+	// Flag bits for Reset packets
+	static const quint8 resetDirFlag	= 0x1;	// SID orientation
 
-	struct UniqueStreamID {
-		quint64 chanId;			// Unique channel+direction ID
-		quint64 streamCtr;		// Stream counter in channel
-	};
 
-	// The topmost bit in a StreamID indicates its origin:
-	// 0 means "originated from me", 1 means "originated from you".
-	static const StreamID sidOrigin = 0x8000;
-
-	// Stream ID 0 and 0^sidOrigin always refer to the root stream.
-	static const StreamID sidRoot = 0x0000;
+	// StreamId 0 always refers to the root stream.
+	static const StreamId sidRoot = 0x0000;
 
 
 	// Index values for [dir] dimension in attach array
@@ -149,5 +187,8 @@ private:
 
 inline uint qHash(const SST::StreamProtocol::ServicePair &svpair)
 	{ return qHash(svpair.first) + qHash(svpair.second); }
+
+inline uint qHash(const SST::UniqueStreamId &usid)
+	{ return qHash(usid.streamCtr) + qHash(usid.chanId); }
 
 #endif	// SST_STRM_PROTO_H

@@ -24,6 +24,12 @@ class FlowCC;
 class KeyInitiator;	// XXX
 
 
+// Packet sequence numbers are 64-bit unsigned integers
+typedef quint64 PacketSeq;
+
+static const PacketSeq maxPacketSeq = ~(PacketSeq)0;
+
+
 // Abstract base class for flow encryption and authentication schemes.
 class FlowArmor
 {
@@ -56,6 +62,11 @@ private:
 	Host *const h;
 	FlowArmor *armr;	// Encryption/authentication method
 	FlowCC *cc;		// Congestion control method
+
+	// Per-direction unique channel IDs for this channel.
+	// Stream layer uses these in assigning USIDs to new streams.
+	QByteArray txchanid;	// Transmit channel ID
+	QByteArray rxchanid;	// Receive channel ID
 
 
 public:
@@ -93,14 +104,23 @@ public:
 	inline void setArmor(FlowArmor *armor) { this->armr = armor; }
 	inline FlowArmor *armor() { return armr; }
 
+	// Set the channel IDs for this flow.
+	inline QByteArray txChannelId() { return txchanid; }
+	inline QByteArray rxChannelId() { return rxchanid; }
+	inline void setChannelIds(const QByteArray &tx, const QByteArray &rx)
+		{ txchanid = tx; rxchanid = rx; }
+
 	// Set the congestion controller for this flow.
 	// This must be set if the client wishes to call mayTransmit().
 	inline void setCongestionController(FlowCC *cc) { this->cc = cc; }
 	inline FlowCC *congestionController() { return cc; }
 
 	// Start and stop the flow.
-	virtual void start();
+	virtual void start(bool initiator);
 	virtual void stop();
+
+	// Return the current link status as observed by this flow.
+	inline LinkStatus linkStatus() const { return linkstat; }
 
 
 protected:
@@ -140,6 +160,7 @@ protected:
 
 	// Retransmit state
 	Timer rtxtimer;		// Retransmit timer
+	LinkStatus linkstat;	// Current link status
 
 	// Receive state
 	quint64 rxseq;		// Last sequence number received
@@ -173,7 +194,8 @@ protected:
 	// Returns true if the transmit was successful,
 	// or false if it failed (e.g., due to lack of buffer space);
 	// a sequence number is assigned even on failure however.
-	bool flowTransmit(const QByteArray &pkt, quint64 &pktseq);
+	bool flowTransmit(QByteArray &pkt, quint64 &pktseq);
+
 
 	// Check congestion control state and return the number of new packets,
 	// if any, that flow control says we may transmit now.
@@ -198,17 +220,35 @@ protected:
 	qint64 markElapsed();
 
 public:
+	// May be called by upper-level protocols during receive
+	// to indicate that the packet has been received and processed,
+	// so that subsequently transmitted packets include this ack info.
+	// if 'sendack' is true, make sure an acknowledgment gets sent soon:
+	// in the next transmitted packet, or in an ack packet if needed.
+	void received(quint16 pktseq, bool sendack);
+
 	inline bool deleyedAcks() const { return delayack; }
 	inline void setDelayedAcks(bool enabled) { delayack = enabled; }
 
+signals:
+	// Indicates when this flow observes a change in link status.
+	void linkStatusChanged(LinkStatus newstatus);
+
 protected:
 	// Main method for upper-layer subclass to receive a packet on a flow.
-	virtual void flowReceive(qint64 pktseq, QByteArray &pkt) = 0;
+	// Should return true if the packet was processed and should be acked,
+	// or false to silently pretend we never received the packet.
+	virtual bool flowReceive(qint64 pktseq, QByteArray &pkt) = 0;
+
+	// Create and transmit a packet for acknowledgment purposes only.
+	// Upper layer may override this if ack packets should contain
+	// more than an just an empty flow payload.
+	virtual bool transmitAck(QByteArray &pkt,
+				quint64 ackseq, unsigned ackct);
 
 	virtual void readyTransmit();
-	virtual void acked(qint64 txseq, int npackets);
-	virtual void missed(qint64 txseq, int npackets);
-	virtual void failed();
+	virtual void acked(quint64 txseq, int npackets, quint64 rxseq);
+	virtual void missed(quint64 txseq, int npackets);
 
 
 private:
@@ -216,15 +256,19 @@ private:
 	virtual void receive(QByteArray &msg, const SocketEndpoint &src);
 
 	// Internal transmit methods.
-	bool tx(const QByteArray &pkt, quint32 packseq,
-			quint64 &pktseq);
-	bool txack(quint32 seq, unsigned ackct);
+	bool tx(QByteArray &pkt, quint32 packseq, quint64 &pktseq);
+	inline bool txack(quint64 ackseq, unsigned ackct)
+		{ QByteArray pkt; return transmitAck(pkt, ackseq, ackct); }
 	inline void flushack()
 		{ if (rxunacked) { rxunacked = 0; txack(rxseq, rxackct); }
 		  acktimer.stop(); }
 
 	inline void rtxstart()
 		{ rtxtimer.start((int)(cumrtt * 2.0)); }
+
+	inline void setLinkStatus(LinkStatus newstat)
+		{ if (linkstat != newstat) {
+			linkStatusChanged(linkstat = newstat); } }
 
 
 private slots:

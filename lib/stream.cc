@@ -25,7 +25,8 @@ Stream::Stream(Host *h, QObject *parent)
 Stream::Stream(AbstractStream *as, QObject *parent)
 :	QIODevice(parent),
 	host(as->h),
-	as(as)
+	as(as),
+	statconn(false)
 {
 	Q_ASSERT(as->strm == NULL);
 	as->strm = this;
@@ -52,10 +53,15 @@ bool Stream::connectTo(const QByteArray &dstid,
 
 	// Create a top-level application stream object for this connection.
 	typedef BaseStream ConnectStream;	// XXX
-	ConnectStream *cs = new ConnectStream(host);
-	cs->connectTo(dstid, service, protocol, dstep);
+	ConnectStream *cs = new ConnectStream(host, dstid, NULL);
 	cs->strm = this;
 	as = cs;
+
+	// Get our link status signal hooked up, if it needs to be.
+	connectLinkStatusChanged();
+
+	// Start the actual network connection process
+	cs->connectTo(service, protocol, dstep);
 
 	// We allow the client to start "sending" data immediately
 	// even before the stream has fully connected.
@@ -64,7 +70,7 @@ bool Stream::connectTo(const QByteArray &dstid,
 	return true;
 }
 
-bool connectTo(const Ident &dstid,
+bool Stream::connectTo(const Ident &dstid,
 		const QString &service, const QString &protocol,
 		const Endpoint &dstep)
 {
@@ -75,6 +81,12 @@ void Stream::disconnect()
 {
 	if (!as)
 		return;		// Already disconnected
+
+	// Disconnect our link status signal.
+	StreamPeer *peer = host->streamPeer(as->peerid, false);
+	if (peer)
+		QObject::disconnect(peer, SIGNAL(linkStatusChanged(LinkStatus)),
+				this, SIGNAL(linkStatusChanged(LinkStatus)));
 
 	// Clear the back-link from the BaseStream.
 	Q_ASSERT(as->strm == this);
@@ -92,6 +104,12 @@ void Stream::disconnect()
 bool Stream::isConnected()
 {
 	return as != NULL;
+}
+
+void Stream::foundPeerEndpoint(const Endpoint &ep)
+{
+	if (!as) return;
+	host->streamPeer(as->peerid)->foundEndpoint(ep);
 }
 
 QByteArray Stream::localHostId()
@@ -224,6 +242,25 @@ Stream *Stream::acceptSubstream()
 	return new Stream(newas, this);
 }
 
+void Stream::connectNotify(const char *signal)
+{
+	connectLinkStatusChanged();
+
+	QIODevice::connectNotify(signal);
+}
+
+void Stream::connectLinkStatusChanged()
+{
+	if (statconn || !as ||
+			receivers(SIGNAL(linkStatusChanged(LinkStatus)) <= 0))
+		return;
+
+	StreamPeer *peer = host->streamPeer(as->peerid);
+	connect(peer, SIGNAL(linkStatusChanged(LinkStatus)),
+		this, SIGNAL(linkStatusChanged(LinkStatus)));
+	statconn = true;
+}
+
 void Stream::shutdown(ShutdownMode mode)
 {
 	if (!as) return;
@@ -311,10 +348,8 @@ void StreamResponder::clientStateChanged()
 	// A RegClient changed state, potentially connected.
 	// (XX make the signal more specific.)
 	// Retry all outstanding lookups in case they might succeed now.
-	foreach (StreamPeer *peer, host()->peers) {
-		if (!peer->flow && !peer->waiting.isEmpty())
-			peer->connectFlow();
-	}
+	foreach (StreamPeer *peer, host()->peers)
+		peer->connectFlow();
 }
 
 void StreamResponder::lookupNotify(const QByteArray &,const Endpoint &loc,
@@ -390,6 +425,11 @@ StreamHostState::~StreamHostState()
 		delete rpndr;
 		rpndr = NULL;
 	}
+
+	// Delete all the StreamPeers we created
+	foreach (StreamPeer *peer, peers)
+		delete peer;
+	peers.clear();
 }
 
 StreamResponder *StreamHostState::streamResponder()
@@ -399,10 +439,10 @@ StreamResponder *StreamHostState::streamResponder()
 	return rpndr;
 }
 
-StreamPeer *StreamHostState::streamPeer(const QByteArray &id)
+StreamPeer *StreamHostState::streamPeer(const QByteArray &id, bool create)
 {
 	StreamPeer *&peer = peers[id];
-	if (!peer)
+	if (!peer && create)
 		peer = new StreamPeer(host(), id);
 	return peer;
 }

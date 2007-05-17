@@ -33,10 +33,25 @@ StreamPeer::StreamPeer(Host *h, const QByteArray &id)
 	}
 }
 
+StreamPeer::~StreamPeer()
+{
+	// Clear the state of all streams associated with this peer.
+	foreach (BaseStream *bs, allstreams)
+		bs->clear();
+	Q_ASSERT(allstreams.isEmpty());
+	Q_ASSERT(usids.isEmpty());
+}
+
 void StreamPeer::connectFlow()
 {
 	Q_ASSERT(!id.isEmpty());
-	Q_ASSERT(!flow);
+
+	if (flow && flow->linkStatus() == LinkUp)
+		return;	// Already have a flow working; don't need another yet.
+
+	// XXX need a working way to determine if streams need to send...
+	//if (receivers(SIGNAL(flowConnected())) == 0)
+	//	return;	// No one is actually waiting for a flow.
 
 	//qDebug() << "Lookup target" << id.toBase64();
 
@@ -63,10 +78,6 @@ void StreamPeer::connectFlow()
 
 	// Keep firing off connection attempts periodically
 	recontimer.start((qint64)connectRetry * 1000000);
-
-	// Check waiting flows already in case no RegClients are active.
-	Q_ASSERT(!flow);
-	checkWaiting();
 }
 
 void StreamPeer::conncli(RegClient *rc)
@@ -89,6 +100,8 @@ void StreamPeer::conncli(RegClient *rc)
 void StreamPeer::lookupDone(const QByteArray &id, const Endpoint &loc,
 				const RegInfo &info)
 {
+	Q_ASSERT(this->id == id);
+
 	// Mark this outstanding lookup as completed.
 	RegClient *rc = (RegClient*)sender();
 	if (!lookups.contains(rc)) {
@@ -100,9 +113,9 @@ void StreamPeer::lookupDone(const QByteArray &id, const Endpoint &loc,
 	// If the lookup failed, notify waiting streams as appropriate.
 	if (loc.isNull()) {
 		qDebug() << this << "Lookup on" << id.toBase64() << "failed";
-		if (!flow)
-			checkWaiting();
-		return;
+		if (!lookups.isEmpty() || !initors.isEmpty())
+			return;		// There's still hope
+		return flowFailed();
 	}
 
 	qDebug() << "StreamResponder::lookupDone: primary" << loc.toString()
@@ -110,10 +123,9 @@ void StreamPeer::lookupDone(const QByteArray &id, const Endpoint &loc,
 
 	// Add the endpoint information we've received to our address list,
 	// and initiate flow setup attempts to those endpoints.
-	StreamPeer *peer = h->streamPeer(id);
-	peer->foundEndpoint(loc);
+	foundEndpoint(loc);
 	foreach (const Endpoint &ep, info.endpoints())
-		peer->foundEndpoint(ep);
+		foundEndpoint(ep);
 }
 
 void StreamPeer::regClientDestroyed(QObject *obj)
@@ -124,9 +136,10 @@ void StreamPeer::regClientDestroyed(QObject *obj)
 	lookups.remove(rc);
 	connrcs.remove(rc);
 
-	// If there are waiting streams and no more RegClients,
-	// notify them next time we get back to the main loop.
-	if (lookups.isEmpty() && initors.isEmpty() && !waiting.isEmpty())
+	// If there are no more RegClients available at all,
+	// notify waiting streams of connection failure
+	// next time we get back to the main loop.
+	if (lookups.isEmpty() && initors.isEmpty())
 		recontimer.start(0);
 }
 
@@ -150,19 +163,19 @@ void StreamPeer::foundEndpoint(const Endpoint &ep)
 
 void StreamPeer::initiate(Socket *sock, const Endpoint &ep)
 {
-	// No need to initiate new flows if we already have one...
-	if (flow) {
-		Q_ASSERT(flow->isActive());
+	// No need to initiate new flows if we already have a working one...
+	if (flow && flow->linkStatus() == LinkUp)
 		return;
-	}
 
 	// Don't simultaneously initiate multiple flows to the same endpoint.
 	// XXX should be keyed on sock too
 	if (initors.contains(ep)) {
-		//qDebug() << "Already initiated connection attempt to"
+		//qDebug() << this << "already attmpting connection to"
 		//	<< ep.toString();
 		return;
 	}
+
+	qDebug() << this << "initiate to" << ep.toString();
 
 	// Make sure our StreamResponder exists
 	// to receive and dispatch incoming key exchange control packets.
@@ -174,7 +187,7 @@ void StreamPeer::initiate(Socket *sock, const Endpoint &ep)
 		qDebug() << "StreamProtocol: could not bind new flow to target"
 			<< ep.toString();
 		delete fl;
-		return checkWaiting();
+		return flowFailed();
 	}
 
 	// Start the key exchange process for the flow.
@@ -188,11 +201,16 @@ void StreamPeer::initiate(Socket *sock, const Endpoint &ep)
 
 void StreamPeer::completed(bool success)
 {
-	if (flow)
-		return;
-
 	KeyInitiator *ki = (KeyInitiator*)sender();
 	Q_ASSERT(ki && ki->isDone());
+
+	// If key agreement succeeded,
+	// remove the resulting flow from the KeyInitiator
+	// so it'll survive the deletion of the KeyInitiator.
+	// XX we should have a way to garbage-collect flows
+	// that stay inactive for a while.
+	if (success)
+		ki->flow()->setParent(this);
 
 	// Remove and schedule the key initiator for deletion,
 	// in case it wasn't removed already by setPrimary()
@@ -203,6 +221,7 @@ void StreamPeer::completed(bool success)
 	Endpoint ep = ki->remoteEndpoint();
 	Q_ASSERT(!initors.contains(ep) || initors.value(ep) == ki);
 	initors.remove(ep);
+	ki->cancel();
 	ki->deleteLater();
 	ki = NULL;
 
@@ -210,22 +229,37 @@ void StreamPeer::completed(bool success)
 	if (!success) {
 		qDebug() << "Connection attempt for ID" << id.toBase64()
 			<< "to" << ep.toString() << "failed";
-		return checkWaiting();
+		if (lookups.isEmpty() && initors.isEmpty())
+			return flowFailed();
+		return;	// There's still hope
 	}
 
 	// We should have an active primary flow at this point,
 	// since StreamFlow::start() attaches the flow if there isn't one.
-	Q_ASSERT(flow != NULL);
+	// Note: the reason we don't just set the primary right here
+	// is because StreamFlow::start gets called on incoming streams too,
+	// so servers don't have to initiate back-flows to their clients...
+	Q_ASSERT(flow && flow->linkStatus() == LinkUp);
 }
 
-void StreamPeer::setPrimary(StreamFlow *fl)
+void StreamPeer::flowStarted(StreamFlow *fl)
 {
-	Q_ASSERT(flow == NULL);
 	Q_ASSERT(fl->isActive());
 	Q_ASSERT(fl->target() == this);
+	Q_ASSERT(fl->linkStatus() == LinkUp);
 
-	qDebug() << "Set primary flow for" << id.toBase64()
-		<< "to" << fl->remoteEndpoint().toString();
+	if (flow) {
+		// If we already have a working primary flow,
+		// we don't need a new one.
+		if (flow->linkStatus() == LinkUp)
+			return;	
+
+		// But if the current primary is on the blink,
+		// replace it.
+		clearPrimary();
+	}
+
+	qDebug() << this << "new primary" << fl;
 
 	// Use this flow as our primary flow for this target.
 	flow = fl;
@@ -234,64 +268,80 @@ void StreamPeer::setPrimary(StreamFlow *fl)
 	// so it won't be deleted when its KeyInitiator disappears.
 	fl->setParent(this);
 
-	// Delete all outstanding KeyInitiators now that we have a primary flow
-	foreach (KeyInitiator *ki, initors.values()) {
-		//qDebug() << "Deleting KeyInitiator for"
-		//	<< id.toBase64()
-		//	<< "to" << fl->remoteEndpoint().toString();
-		ki->deleteLater();
-	}
-	initors.clear();
+	// Watch the link status of our primary flow,
+	// so we can try to replace it if it fails.
+	connect(fl, SIGNAL(linkStatusChanged(LinkStatus)),
+		this, SLOT(primaryStatusChanged(LinkStatus)));
 
-	// Connect all waiting streams to the new primary flow
-	foreach (BaseStream *bs, waiting) {
-		Q_ASSERT(bs->state == BaseStream::WaitFlow);
-		bs->connectToFlow(flow);
-	}
-	Q_ASSERT(waiting.isEmpty());
+	// Notify all waiting streams
+	flowConnected();
+	linkStatusChanged(LinkUp);
 }
 
-void StreamPeer::checkWaiting()
+void StreamPeer::clearPrimary()
 {
-	Q_ASSERT(!flow);
-	if (!lookups.isEmpty() || !initors.isEmpty())
-		return;		// Still stuff going on
+	if (!flow)
+		return;
 
-#if 0
-	foreach (BaseStream *strm, waiting) {
-		Q_ASSERT(strm->state == BaseStream::WaitFlow);
+	// Clear the primary flow
+	StreamFlow *old = flow;
+	flow = NULL;
 
-		// Don't kill persistent streams.
-		if (strm->persist)
-			continue;
+	// Avoid getting further primary link status notifications from it
+	disconnect(old, SIGNAL(linkStatusChanged(LinkStatus)),
+		this, SLOT(primaryStatusChanged(LinkStatus)));
 
-		// Notify this stream of connection failure.
-		strm->fail(tr("Cannot establish connection to host ID %0")
-				.arg(QString(id.toBase64())));
-		Q_ASSERT(!waiting.contains(strm));
+	// Clear all transmit-attachments
+	// and return outstanding packets to the streams they came from.
+	old->detachAll();
+}
+
+void StreamPeer::primaryStatusChanged(LinkStatus newstatus)
+{
+	qDebug() << this << "primaryStatusChanged" << newstatus;
+	Q_ASSERT(flow);
+
+	if (newstatus == LinkUp) {
+		// Now that we (again?) have a working primary flow,
+		// cancel and delete all outstanding KeyInitiators
+		// that are still in an early enough stage
+		// not to have possibly created receiver state.
+		// (If we were to kill a non-early KeyInitiator,
+		// the receiver might pick one of those streams
+		// as _its_ primary and be left with a dangling flow!)
+		foreach (KeyInitiator *ki, initors.values()) {
+			if (!ki->isEarly())
+				continue;	// too late - let it finish
+			qDebug() << "deleting" << ki << "for" << id.toBase64()
+				<< "to" << ki->remoteEndpoint().toString();
+			Q_ASSERT(initors.value(ki->remoteEndpoint()) == ki);
+			initors.remove(ki->remoteEndpoint());
+			ki->cancel();
+			ki->deleteLater();
+		}
+		return;
 	}
-#endif
+
+	// Primary is at least stalled, perhaps permanently failed -
+	// start looking for alternate paths right away for quick response.
+	connectFlow();
+
+	// Pass the signal on to all streams connected to this peer.
+	linkStatusChanged(newstatus);
 }
 
 void StreamPeer::retryTimeout()
 {
 	// If we actually have an active flow now, do nothing.
-	if (flow)
+	if (flow && flow->linkStatus() == LinkUp)
 		return;
 
-	// Re-check and notify non-persistent streams of failure
-	checkWaiting();
+	// Notify any waiting streams of failure
+	if (lookups.isEmpty() && initors.isEmpty())
+		flowFailed();
 
-#if 0
-	// Update our persist flag depending on still-waiting streams.
-	persist = false;
-	foreach (BaseStream *strm, waiting)
-		if (strm->persist)
-			persist = true;
-
-	// If still persistent, fire off a new batch of connection attempts.
-	if (persist)
-#endif
-		connectFlow();
+	// If there are (still) any waiting streams,
+	// fire off a new batch of connection attempts.
+	connectFlow();
 }
 

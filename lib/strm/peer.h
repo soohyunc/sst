@@ -40,7 +40,6 @@ class StreamPeer : public QObject, public StreamProtocol
 	const QByteArray id;		// Host ID of target
 	StreamFlow *flow;		// Current primary flow
 	QSet<RegClient*> lookups;	// Outstanding lookups in progress
-	QSet<BaseStream*> waiting;	// Streams waiting for a flow
 	Timer recontimer;		// For persistent lookup requests
 
 	// Set of RegClients we've connected to so far
@@ -50,13 +49,21 @@ class StreamPeer : public QObject, public StreamProtocol
 	QSet<Endpoint> addrs;		// Potential locations known
 	QHash<Endpoint,KeyInitiator*> initors;
 
+	// All existing streams involving this peer.
+	QSet<BaseStream*> allstreams;
+
+	// All streams that have USIDs, registered by their USIDs
+	QHash<UniqueStreamId,BaseStream*> usids;
+
 
 	StreamPeer(Host *h, const QByteArray &id);
+	~StreamPeer();
 
 	inline QByteArray remoteHostId() { return id; }
 
 	// Initiate a connection attempt to target host by any means possible,
 	// hopefully at some point resulting in an active primary flow.
+	// Eventually emits a flowConnected() or a flowFailed() signal.
 	void connectFlow();
 
 	// Connect to a given RegClient's signals
@@ -66,18 +73,29 @@ class StreamPeer : public QObject, public StreamProtocol
 	// if such an attempt isn't already in progress.
 	void initiate(Socket *sock, const Endpoint &ep);
 
+	// Called by StreamFlow::start() whenever a new flow
+	// (either incoming or outgoing) successfully starts.
+	void flowStarted(StreamFlow *flow);
+
+	// Clear the peer's current primary flow.
+	void clearPrimary();
+
+public:
+	// Supply an endpoint hint that may be useful for finding this peer.
 	void foundEndpoint(const Endpoint &ep);
 
-	void setPrimary(StreamFlow *flow);
+signals:
+	void flowConnected();	// Primary flow connection attempt succeeded
+	void flowFailed();	// Connection attempt or primary flow failed
 
-	// Check for waiting streams that should be notified of failure.
-	void checkWaiting();
+	void linkStatusChanged(LinkStatus status);
 
 private slots:
 	void completed(bool success);
 	void lookupDone(const QByteArray &id, const Endpoint &loc,
 			const RegInfo &info);
 	void regClientDestroyed(QObject *obj);
+	void primaryStatusChanged(LinkStatus newstatus);
 	void retryTimeout();
 };
 

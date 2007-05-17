@@ -46,6 +46,7 @@ Flow::Flow(Host *host, QObject *parent)
 	armr(NULL),
 	cc(NULL),
 	rtxtimer(host),
+	linkstat(LinkDown),
 	delayack(true),
 	acktimer(host),
 	statstimer(host)
@@ -97,15 +98,17 @@ Flow::Flow(Host *host, QObject *parent)
 	//statstimer.start(5*1000);
 }
 
-void Flow::start()
+void Flow::start(bool initiator)
 {
 	Q_ASSERT(armr);
 
-	SocketFlow::start();
+	SocketFlow::start(initiator);
 
 	// We're ready to go!
 	rtxstart();
 	readyTransmit();
+
+	setLinkStatus(LinkUp);
 }
 
 void Flow::stop()
@@ -115,6 +118,8 @@ void Flow::stop()
 	statstimer.stop();
 
 	SocketFlow::stop();
+
+	setLinkStatus(LinkDown);
 }
 
 inline qint64 Flow::markElapsed()
@@ -128,17 +133,13 @@ inline qint64 Flow::markElapsed()
 // with a specified ACK sequence/count word.
 // Returns true on success, false on error
 // (e.g., no output buffer space for packet)
-bool Flow::tx(const QByteArray &pkt, quint32 packseq,
-		quint64 &pktseq)
+bool Flow::tx(QByteArray &pkt, quint32 packseq, quint64 &pktseq)
 {
 	Q_ASSERT(isActive());
-	//qDebug("tx seq %llu ackseq %u ackct %d size %d", txseq,
-	//	packseq & ackSeqMask, (packseq >> ackctShift) & ackctMask,
-	//	pkt.size());
 
 	// Don't allow txseq counter to wrap (XXX re-key before it does!)
 	pktseq = txseq;
-	Q_ASSERT(txseq < (quint64)0-1);
+	Q_ASSERT(txseq < maxPacketSeq);
 	quint32 ptxseq = ((quint32)pktseq & seqMask) |
 			(quint32)remoteChannel() << chanShift;
 
@@ -163,26 +164,28 @@ bool Flow::tx(const QByteArray &pkt, quint32 packseq,
 	}
 	txseq++;
 
+	//qDebug() << this << "tx seq" << txseq << "size" << epkt.size();
+
 	// Ship it out
 	return udpSend(epkt);
-
-	// Return the packet sequence number
 }
 
 // Send a standalone ACK packet
-bool Flow::txack(quint32 ackseq, unsigned ackct)
+bool Flow::transmitAck(QByteArray &pkt, quint64 ackseq, unsigned ackct)
 {
+	//qDebug() << this << "transmitAck" << ackseq << ackct;
+
 	Q_ASSERT(ackct <= ackctMax);
 
-	QByteArray pkt;
-	pkt.resize(hdrlen);
+	if (pkt.size() < hdrlen)
+		pkt.resize(hdrlen);
 	quint32 packseq = (ackct << ackctShift) | (ackseq & ackSeqMask);
 	quint64 pktseq;
-	return tx(pkt, packseq, pktseq) > 0;
+	return tx(pkt, packseq, pktseq);
 }
 
 // High-level public transmit function.
-bool Flow::flowTransmit(const QByteArray &pkt, quint64 &pktseq)
+bool Flow::flowTransmit(QByteArray &pkt, quint64 &pktseq)
 {
 	Q_ASSERT(pkt.size() > hdrlen);	// should be a nonempty data packet
 
@@ -197,7 +200,7 @@ bool Flow::flowTransmit(const QByteArray &pkt, quint64 &pktseq)
 	}
 
 	// Send the packet
-	bool rc = tx(pkt, packseq, pktseq);
+	bool success = tx(pkt, packseq, pktseq);
 
 	// If the retransmission timer is inactive, start it afresh.
 	// (If this was a retransmission, rtxTimeout() would have restarted it.)
@@ -208,7 +211,7 @@ bool Flow::flowTransmit(const QByteArray &pkt, quint64 &pktseq)
 		rtxstart();
 	}
 
-	return rc;
+	return success;
 }
 
 int Flow::mayTransmit()
@@ -227,7 +230,7 @@ int Flow::mayTransmit()
 // a retransmission timer per packet?
 void Flow::rtxTimeout(bool fail)
 {
-	qDebug() << "Flow::rtxTimeout" << (fail ? "- FAILED" : "")
+	qDebug() << this << "rtxTimeout" << (fail ? "- FAILED" : "")
 		<< "period" << rtxtimer.interval();
 
 	// Restart the retransmission timer
@@ -238,7 +241,7 @@ void Flow::rtxTimeout(bool fail)
 	ssthresh = (txseq - txackseq) / 2;
 	ssthresh = qMax(ssthresh, CWND_MIN);
 	cwnd = CWND_MIN;
-	qDebug("rtxTimeout: ssthresh = %d, cwnd = %d", ssthresh, cwnd);
+	//qDebug("rtxTimeout: ssthresh = %d, cwnd = %d", ssthresh, cwnd);
 
 	// Notify the upper layer of the un-acked data packets.
 	int ackdiff = txdatseq - txackseq;
@@ -262,24 +265,17 @@ void Flow::rtxTimeout(bool fail)
 
 	// If we exceed a threshold timeout, signal a failed connection.
 	// The subclass has no obligation to do anything about this, however.
-	if (fail) {
-		//qDebug() << "rtxTimeout: failed at time"
-		//	<< QDateTime::currentDateTime()
-		//		.toString("h:mm:ss:zzz")
-		//	<< "failtime" << rtxtimer.failTime()
-		//		.toString("h:mm:ss:zzz");
-		failed();
-	}
+	setLinkStatus(fail ? LinkDown : LinkStalled);
 }
 
 void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 {
 	if (!isActive()) {
-		qDebug() << "Dropping packet received while flow inactive";
+		qDebug() << this << "receive: inactive flow";
 		return;
 	}
 	if (pkt.size() < hdrlen) {
-		qDebug("Flow receceive: dropped runt packet");
+		qDebug() << this << "receive: runt packet";
 		return;
 	}
 
@@ -292,7 +288,7 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 					- ((qint32)rxseq << chanBits))
 				>> chanBits;
 	quint64 pktseq = rxseq + seqdiff;
-	//qDebug("rx seq %llu size %d", pktseq, pkt.size());
+	//qDebug() << this << "rx seq" << pktseq << "size" << pkt.size();
 
 	// Immediately drop too-old or already-received packets
 	Q_ASSERT(sizeof(rxmask)*8 == maskBits);
@@ -313,76 +309,13 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 
 	// Authenticate and decrypt the packet
 	if (!armr->rxdec(pktseq, pkt)) {
-		qDebug("Flow receive: packet failed to authenticate");
+		qDebug() << this << "receive: auth failed on rx" << pktseq;
 		return;
 	}
 
 	// Decode the rest of the flow header
-	bool ackonly = (pkt.size() == hdrlen);
 	pkt32 = (quint32*)pkt.data(); // might have changed in armr->rxdec()!
 	quint32 packseq = ntohl(pkt32[1]);
-
-	// Update our receive state for this packet
-	bool needack = false;
-	if (seqdiff == 1) {
-
-		// Received packet is in-order and contiguous.
-		// Roll rxseq and rxmask forward appropriately.
-		rxseq = pktseq;
-		rxmask = (rxmask << 1) + 1;
-		rxackct++;
-		if (rxackct > ackctMax)
-			rxackct = ackctMax;
-
-		// ACK the received packet if appropriate.
-		// Delay our ACK for up to ACKPACKETS
-		// received non-ACK-only packets,
-		// or up to ACKACKPACKETS continuous ack-only packets.
-		++rxunacked;
-		if (ackonly && rxunacked < ACKACKPACKETS) {
-			// Only ack acks occasionally,
-			// and don't start the ack timer for them.
-		} else 
-			needack = true;
-
-	} else if (seqdiff > 1) {
-
-		// Received packet is in-order but discontiguous.
-		// One or more packets probably were lost.
-		// Flush any delayed ACK immediately,
-		// before updating our receive state.
-		flushack();
-
-		// Roll rxseq and rxmask forward appropriately.
-		rxseq = pktseq;
-		if (seqdiff < maskBits)
-			rxmask = (rxmask << seqdiff) + 1;
-		else
-			rxmask = 1;	// bit 0 = packet just received
-
-		// Reset the contiguous packet counter
-		rxackct = 0;	// (0 means 1 packet received)
-
-		// ACK this discontiguous packet immediately
-		// so that the sender is informed of lost packets ASAP.
-		if (!ackonly)
-			txack(rxseq, 0);
-
-	} else {
-		Q_ASSERT(pktseq < rxseq);
-
-		// Out-of-order packet received.
-		// Flush any delayed ACK immediately.
-		flushack();
-
-		// Set appropriate bit in rxmask for replay protection
-		Q_ASSERT(seqdiff < 0 && seqdiff > -maskBits);
-		rxmask |= (1 << -seqdiff);
-
-		// ACK this out-of-order packet immediately.
-		if (!ackonly)
-			txack(pktseq, 0);
-	}
 
 	// Update our transmit state with the ack info in this packet
 	unsigned ackct = (packseq >> ackctShift) & ackctMask;
@@ -477,12 +410,13 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 		txackmask |= (1 << newpackets) - 1;
 
 		// Notify the upper layer of the acknowledged packets
-		acked(txackseq - newpackets + 1, newpackets);
+		acked(txackseq - newpackets + 1, newpackets, pktseq);
 
 		// Reset the retransmission timer, since we've made progress.
 		// Only re-arm it if there's still outstanding unACKed data.
+		setLinkStatus(LinkUp);
 		if (txdatseq > txackseq) {
-			//qDebug() << "udpReceive: rtxstart at time"
+			//qDebug() << this << "receive: rtxstart at time"
 			//	<< QDateTime::currentDateTime()
 			//		.toString("h:mm:ss:zzz");
 			rtxstart();
@@ -506,7 +440,7 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 			if (txackmask & (1 << bit))
 				continue;	// already ACKed
 			txackmask |= (1 << bit);
-			acked(txackseq - bit, 1);
+			acked(txackseq - bit, 1, pktseq);
 			newpackets++;
 		}
 	}
@@ -682,16 +616,44 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 	// Always clamp cwnd against CWND_MAX.
 	cwnd = qMin(cwnd, CWND_MAX);
 
-	// Pass the received packet to the upper layer for processing
-	if (!ackonly)
-		flowReceive(pktseq, pkt);
+	// Pass the received packet to the upper layer for processing.
+	// It'll return true if it wants us to ack the packet, false otherwise.
+	if (flowReceive(pktseq, pkt))
+		received(pktseq, true);
+		// XX should still replay-protect even if no ack!
 
 	// Signal upper layer that we can transmit more, if appropriate
 	if (newpackets > 0 && mayTransmit())
 		readyTransmit();
+}
 
-	// Finally, if an ack is (still) warranted by this time, send it.
-	if (needack) {
+void Flow::received(quint16 pktseq, bool sendack)
+{
+	//qDebug() << this << "acknowledging" << pktseq
+	//	<< (sendack ? "(sending)" : "(not sending)");
+
+	// Update our receive state to account for this packet
+	qint32 seqdiff = pktseq - rxseq;
+	if (seqdiff == 1) {
+
+		// Received packet is in-order and contiguous.
+		// Roll rxseq and rxmask forward appropriately.
+		rxseq = pktseq;
+		rxmask = (rxmask << 1) + 1;
+		rxackct++;
+		if (rxackct > ackctMax)
+			rxackct = ackctMax;
+
+		// ACK the received packet if appropriate.
+		// Delay our ACK for up to ACKPACKETS
+		// received non-ACK-only packets,
+		// or up to ACKACKPACKETS continuous ack-only packets.
+		++rxunacked;
+		if (!sendack && rxunacked < ACKACKPACKETS) {
+			// Only ack acks occasionally,
+			// and don't start the ack timer for them.
+			return;
+		}
 		if (rxunacked < ACKACKPACKETS) {
 			// Schedule an ack for transmission
 			// by starting the ack timer.
@@ -713,6 +675,43 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 			// no matter what...
 			flushack();
 		}
+
+	} else if (seqdiff > 1) {
+
+		// Received packet is in-order but discontiguous.
+		// One or more packets probably were lost.
+		// Flush any delayed ACK immediately,
+		// before updating our receive state.
+		flushack();
+
+		// Roll rxseq and rxmask forward appropriately.
+		rxseq = pktseq;
+		if (seqdiff < maskBits)
+			rxmask = (rxmask << seqdiff) + 1;
+		else
+			rxmask = 1;	// bit 0 = packet just received
+
+		// Reset the contiguous packet counter
+		rxackct = 0;	// (0 means 1 packet received)
+
+		// ACK this discontiguous packet immediately
+		// so that the sender is informed of lost packets ASAP.
+		if (sendack)
+			txack(rxseq, 0);
+
+	} else if (seqdiff < 0) {
+
+		// Old packet recieved out of order.
+		// Flush any delayed ACK immediately.
+		flushack();
+
+		// Set appropriate bit in rxmask for replay protection
+		Q_ASSERT(seqdiff < 0 && seqdiff > -maskBits);
+		rxmask |= (1 << -seqdiff);
+
+		// ACK this out-of-order packet immediately.
+		if (sendack)
+			txack(pktseq, 0);
 	}
 }
 
@@ -735,15 +734,11 @@ void Flow::readyTransmit()
 {
 }
 
-void Flow::acked(qint64, int)
+void Flow::acked(quint64, int, quint64)
 {
 }
 
-void Flow::missed(qint64, int)
-{
-}
-
-void Flow::failed()
+void Flow::missed(quint64, int)
 {
 }
 
@@ -787,7 +782,7 @@ bool ChecksumArmor::rxdec(qint64 pktseq, QByteArray &pkt)
 	quint32 ivec[2] = { htonl(pktseq >> 32), htonl(pktseq) };
 	chk.update(ivec, 8);
 	chk.update(pkt.data(), size);
-	quint32 sum = htonl(chk.final() + txkey);
+	quint32 sum = htonl(chk.final() + rxkey);
 	QByteArray sumbuf((const char*)&sum, 4);
 
 	// Verify and strip the packet's checksum.
@@ -809,8 +804,10 @@ AESArmor::AESArmor(const QByteArray &txenckey, const QByteArray &txmackey,
 :	txaes(txenckey, AES::CtrEncrypt), rxaes(rxenckey, AES::CtrDecrypt),
 	txmac(txmackey), rxmac(rxmackey)
 {
-	//qDebug() << "txenc" << txenckey.toBase64();
-	//qDebug() << "rxenc" << rxenckey.toBase64();
+	//qDebug() << this << "txenc" << txenckey.toBase64();
+	//qDebug() << this << "rxenc" << rxenckey.toBase64();
+	//qDebug() << this << "txmac" << txmackey.toBase64();
+	//qDebug() << this << "rxmac" << rxmackey.toBase64();
 }
 
 QByteArray AESArmor::txenc(qint64 pktseq, const QByteArray &pkt)
@@ -845,14 +842,20 @@ QByteArray AESArmor::txenc(qint64 pktseq, const QByteArray &pkt)
 	hmac.finalAppend(epkt);
 	Q_ASSERT(epkt.size() == size + HMACLEN);
 
+	//qDebug() << this << "txenc" << pktseq << epkt.size();
+
 	return epkt;
 }
 
 bool AESArmor::rxdec(qint64 pktseq, QByteArray &pkt)
 {
+	//qDebug() << this << "rxdec" << pktseq << pkt.size();
+
 	int size = pkt.size() - HMACLEN;
-	if (size < Flow::hdrlen)
+	if (size < Flow::hdrlen) {
+		qDebug() << this << "rxdec: received packet too small";
 		return false;	// too small to contain a full HMAC
+	}
 
 	// Build the initialization vector template for decryption.
 	// We also use the first 8 bytes as a pseudo-header for the MAC.

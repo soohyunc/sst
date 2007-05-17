@@ -30,6 +30,17 @@ class SocketReceiver;
 class SocketHostState;
 
 
+// SST expresses current link status as one of three states:
+//	- LinkUp: apparently alive, all's well as far as we know.
+//	- LinkStalled: briefly lost connectivity, but may be temporary.
+//	- LinkDown: definitely appears to be down for the count.
+enum LinkStatus {
+	LinkDown,
+	LinkStalled,
+	LinkUp
+};
+
+
 // An 8-bit channel number distinguishes different flows
 // between the same pair of socket-layer endpoints.
 // Channel number 0 is always invalid.
@@ -210,7 +221,7 @@ public:
 	inline Channel remoteChannel() { return remotechan; }
 
 	// Start or stop the flow.
-	virtual void start();
+	virtual void start(bool initiator);
 	virtual void stop();
 
 	// Return infrormation about flow state.

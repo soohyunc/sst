@@ -11,32 +11,135 @@
 using namespace SST;
 
 
+////////// StreamTxAttachment //////////
+
+void StreamTxAttachment::setAttaching(StreamFlow *flow, quint16 sid)
+{
+	Q_ASSERT(!isInUse());
+	this->flow = flow;
+	this->sid = sid;
+	this->sidseq = maxPacketSeq;	// set when we get Ack
+	this->active = this->deprecated = false;
+
+	Q_ASSERT(!flow->txsids.contains(sid));
+	flow->txsids.insert(sid, this);
+}
+
+void StreamTxAttachment::clear()
+{
+	StreamFlow *fl = flow;
+	if (!fl)
+		return;
+
+	if (strm->tcuratt == this)
+		strm->tcuratt = NULL;	// XX any notification?
+
+	Q_ASSERT(fl->txsids.value(sid) == this);
+	fl->txsids.remove(sid);
+	flow = NULL;
+	active = false;
+
+	// Remove the stream from the flow's waiting streams list
+	int rc = fl->dequeueStream(strm);
+	Q_ASSERT(rc <= 1);
+	strm->tqflow = false;
+
+	// Clear out packets for this stream from flow's ackwait table
+	foreach (qint64 txseq, fl->ackwait.keys()) {
+		BaseStream::Packet &p = fl->ackwait[txseq];
+		Q_ASSERT(!p.isNull());
+		Q_ASSERT(p.strm);
+		if (p.strm != strm)
+			continue;
+
+		// Move the packet back to the stream's transmit queue
+		strm->missed(fl, p);
+		fl->ackwait.remove(txseq);
+	}
+}
+
+
+////////// StreamRxAttachment //////////
+
+void StreamRxAttachment::setActive(
+		StreamFlow *flow, quint16 sid, PacketSeq rxseq)
+{
+	Q_ASSERT(!isActive());
+	this->flow = flow;
+	this->sid = sid;
+	this->sidseq = rxseq;
+
+	Q_ASSERT(!flow->rxsids.contains(sid));
+	flow->rxsids.insert(sid, this);
+}
+
+void StreamRxAttachment::clear()
+{
+	if (flow) {
+		Q_ASSERT(flow->rxsids.value(sid) == this);
+		flow->rxsids.remove(sid);
+		flow = NULL;
+	}
+}
+
+
 ////////// BaseStream //////////
 
-BaseStream::BaseStream(Host *h)
+BaseStream::BaseStream(Host *h, QByteArray peerid, BaseStream *parent)
 :	AbstractStream(h),
-	state(Disconnected),
-	flow(NULL),
-	parent(NULL),
-	sid(0),
-	mature(false),
+	parent(parent),
+	state(Fresh),
+	init(true),
+	toplev(false),
 	endread(false),
 	endwrite(false),
+	tcuratt(NULL),
 	tsn(0),
 	twin(0),
+	tqflow(false),
 	ravail(0),
 	rmsgavail(0),
 	rwinbyte(16),		// XX
 	rsn(0)
 {
+	Q_ASSERT(!peerid.isEmpty());
+	this->peerid = peerid;
+	this->peer = h->streamPeer(peerid);
+
+	// Insert us into the peer's master list of streams
+	peer->allstreams.insert(this);
+
+	// Initialize the stream back-pointers in the attachment slots.
+	for (int i = 0; i < maxAttach; i++) {
+		tatt[i].strm = this;
+		ratt[i].strm = this;
+	}
 }
 
 BaseStream::~BaseStream()
 {
 	//qDebug() << "~" << this << (parent == NULL ? "(root)" : "");
+	clear();
+}
 
-	disconnect();
-	Q_ASSERT(!flow);
+void BaseStream::clear()
+{
+	state = Disconnected;
+	endread = endwrite = true;
+
+	// De-register us from our peer
+	if (peer) {
+		if (peer->usids.value(usid) == this)
+			peer->usids.remove(usid);
+		peer->allstreams.remove(this);
+		peer = NULL;
+	}
+
+	// Clear any attachments we may have
+	for (int i = 0; i < maxAttach; i++) {
+		tatt[i].clear();
+		ratt[i].clear();
+	}
 
 	// Reset any unaccepted incoming substreams too
 	foreach (AbstractStream *sub, rsubs) {
@@ -46,18 +149,15 @@ BaseStream::~BaseStream()
 	rsubs.clear();
 }
 
-void BaseStream::connectTo(const QByteArray &dstid,
-			const QString &service, const QString &protocol,
+void BaseStream::connectTo(const QString &service, const QString &protocol,
 			const Endpoint &dstep)
 {
-	Q_ASSERT(!dstid.isEmpty());
 	Q_ASSERT(!service.isEmpty());
-	Q_ASSERT(state == Disconnected);
-	Q_ASSERT(flow == NULL);
+	Q_ASSERT(state == Fresh);
+	Q_ASSERT(tcuratt == NULL);
 
 	// Find or create the Target struct for the destination ID
-	peerid = dstid;
-	StreamPeer *peer = h->streamPeer(dstid);
+	toplev = true;
 
 	// If we were given a location hint, record it for setting up flows.
 	if (!dstep.isNull())
@@ -71,58 +171,151 @@ void BaseStream::connectTo(const QByteArray &dstid,
 	ws << (qint32)ConnectRequest << service << protocol;
 	writeMessage(msg.data(), msg.size());
 
-	// If there's already an active flow, just use it.
-	if (peer->flow) {
-		Q_ASSERT(peer->flow->isActive());
-		return connectToFlow(peer->flow);
-	}
-
-	// Get the location and flow setup process for this host ID underway.
-	qDebug() << "connectTo: WaitFlow";
-	state = WaitFlow;
-	peer->waiting.insert(this);
-	peer->connectFlow();
-}
-
-void BaseStream::connectToFlow(StreamFlow *flow)
-{
-	//qDebug() << "connectToFlow" << flow;
-	Q_ASSERT(state == Disconnected || state == WaitFlow);
-	Q_ASSERT(!peerid.isEmpty());
-	Q_ASSERT(!this->flow);
-	Q_ASSERT(!this->sid);
-	Q_ASSERT(parent == NULL);
-
-	if (state == WaitFlow) {
-		StreamPeer *peer = h->peers.value(peerid);
-		Q_ASSERT(peer && peer->waiting.contains(this));
-		peer->waiting.remove(this);
-	}
-
-	// Allocate a StreamID for this stream.
-	Q_ASSERT(flow->isActive());
-	parent = &flow->root;
-	if (!flow->attach(this))
-		return fail(
-			tr("No stream IDs available while connecting to %0")
-				.arg(flow->remoteEndpoint().toString()));
-
 	// Record that we're waiting for a response from the server.
 	state = WaitService;
 
-	// We should already have at least a service request
-	// and possibly application data waiting to be sent.
-	Q_ASSERT(!tqueue.isEmpty());
+	// Attach to a suitable flow, initiating a new one if necessary.
+	tattach();
+}
+
+void BaseStream::tattach()
+{
+	Q_ASSERT(!peerid.isEmpty());
+
+	// If we already have a transmit-attachment, nothing to do.
+	if (tcuratt != NULL) {
+		Q_ASSERT(tcuratt->isInUse());
+		return;
+	}
+
+	// If we're disconnected, we'll never need to attach again...
+	if (state == Disconnected)
+		return;
+
+	// See if there's already an active flow for this peer.
+	// If so, use it - otherwise, create one.
+	if (!peer->flow) {
+		// Get the flow setup process for this host ID underway.
+		// XX provide an initial packet to avoid an extra RTT!
+		qDebug() << this << "tattach: wait for flow";
+		connect(peer, SIGNAL(flowConnected()),
+			this, SLOT(gotFlowConnected()));
+		return peer->connectFlow();
+	}
+	StreamFlow *flow = peer->flow;
+	Q_ASSERT(flow->isActive());
+
+	// If we're initiating a new stream and our peer hasn't acked it yet,
+	// make sure we have a parent USID to refer to in creating the stream.
+	if (init && pusid.isNull()) {
+		// No parent USID yet - try to get it from the parent stream.
+		if (!parent) {
+			// Top-level streams just use any flow's root stream.
+			if (toplev)
+				parent = &flow->root;
+			else
+				return fail(tr("Parent stream closed before "
+						"child could be initiated"));
+		}
+		pusid = parent->usid;
+		if (pusid.isNull()) {
+			// Parent itself doesn't have a USID yet -
+			// we have to wait until it does.
+			qDebug() << this << "parent has no USID yet: waiting";
+			connect(parent, SIGNAL(attached()),
+				this, SLOT(gotParentAttached()));
+			return parent->tattach();
+		}
+	}
+
+	// Allocate a StreamId for this stream.
+	// Scan forward through our SID space a little ways for a free SID;
+	// if there are none, then pick a random one and detach it.
+	StreamCtr ctr = flow->txctr;
+	if (flow->txsids.contains(ctr)) {
+		int maxsearch = 0x7ff0 - (flow->txctr - flow->txackctr);
+		maxsearch = qMin(maxsearch, maxSidSkip);
+		do {
+			if (maxsearch-- <= 0) {
+				qDebug() << this << "tattach: no free SID";
+				Q_ASSERT(0);	// XXX wait for a free one
+			}
+		} while (flow->txsids.contains(++ctr));
+	}
+
+	// Find a free attachment slot.
+	int slot = 0;
+	while (tatt[slot].isInUse()) {
+		if (++slot == maxAttach) {
+			// All attachment slots are still in use.
+			// This probably should never happen in practice,
+			// but could if all slots are trying to detach...
+			qDebug() << this << "tattach: all slots in use";
+			Q_ASSERT(0);	// XXX wait for a free one
+		}
+	}
+
+	// Update our stream counter
+	Q_ASSERT(ctr >= flow->txctr);
+	flow->txctr = ctr+1;
+
+	// Attach to the stream using the selected slot.
+	tatt[slot].setAttaching(flow, ctr);
+	tcuratt = &tatt[slot];
+
+	// Fill in the new stream's USID, if it doesn't have one yet.
+	if (usid.isNull()) {
+		setUsid(UniqueStreamId(ctr, flow->txChannelId()));
+		qDebug() << this << "creating stream" << usid;
+	}
+
+	// Get us in line to transmit on the flow.
+	// We at least need to transmit an attach message of some kind;
+	// in the case of Init or Reply it might also include data.
 	Q_ASSERT(!flow->tstreams.contains(this));
-	flow->enqueueStream(this);
+	txenqflow();
 	if (flow->mayTransmit())
 		flow->readyTransmit();
+}
+
+void BaseStream::gotParentAttached()
+{
+	qDebug() << this << "gotParentAttached";
+	if (parent)
+		QObject::disconnect(parent, SIGNAL(attached()),
+				this, SLOT(gotParentAttached()));
+
+	// Retry attach now that parent hopefully has a USID
+	return tattach();
+}
+
+void BaseStream::gotFlowConnected()
+{
+	qDebug() << this << "gotFlowConnected";
+	if (peer)
+		QObject::disconnect(peer, SIGNAL(flowConnected()),
+				this, SLOT(gotFlowConnected()));
+
+	// Retry attach now that we hopefully have an active flow
+	tattach();
+}
+
+void BaseStream::setUsid(const UniqueStreamId &newusid)
+{
+	Q_ASSERT(usid.isNull());
+	Q_ASSERT(!newusid.isNull());
+
+	if (peer->usids.contains(usid))
+		qWarning("Duplicate stream USID!?");
+
+	usid = newusid;
+	peer->usids.insert(usid, this);
 }
 
 void BaseStream::gotServiceReply()
 {
 	Q_ASSERT(state == WaitService);
-	Q_ASSERT(flow);
+	Q_ASSERT(tcuratt);
 
 	QByteArray msg(readMessage(maxServiceMsgSize));
 	XdrStream rs(&msg, QIODevice::ReadOnly);
@@ -149,6 +342,9 @@ void BaseStream::gotServiceRequest()
 	if (rs.status() != rs.Ok || code != (qint32)ConnectRequest)
 		return fail("Bad service request");
 
+	qDebug() << this << "gotServiceRequest service" << svpair.first
+		<< "protocol" << svpair.second;
+
 	// Lookup the requested service
 	StreamServer *svr = h->listeners.value(svpair);
 	if (svr == NULL)
@@ -171,18 +367,15 @@ void BaseStream::gotServiceRequest()
 
 AbstractStream *BaseStream::openSubstream()
 {
-	Q_ASSERT(isLinkUp());
-	Q_ASSERT(flow);
-
-	BaseStream *nstrm = new BaseStream(h);
-	nstrm->parent = this;
-	nstrm->peerid = peerid;
-	if (!flow->attach(nstrm, 0)) {
-		qDebug("rxinit: could not attach new substream to flow");
-		return NULL;
-	}
-
+	// Create the new sub-BaseStream.
+	// Note that the parent doesn't have to be attached yet:
+	// the substream will attach and wait for the parent if necessary.
+	BaseStream *nstrm = new BaseStream(h, peerid, this);
 	nstrm->state = Connected;
+
+	// Start trying to attach the new stream, if possible.
+	tattach();
+
 	return nstrm;
 }
 
@@ -191,7 +384,8 @@ void BaseStream::setPriority(int newpri)
 	//qDebug() << this << "set priority" << newpri;
 	AbstractStream::setPriority(newpri);
 
-	if (flow && !tqueue.isEmpty()) {
+	if (tqflow) {
+		StreamFlow *flow = tcuratt->flow;
 		Q_ASSERT(flow->isActive());
 		int rc = flow->dequeueStream(this);
 		Q_ASSERT(rc == 1);
@@ -203,89 +397,507 @@ void BaseStream::txqueue(const Packet &pkt)
 {
 	// Add the packet to our stream-local transmit queue.
 	// Keep it in order of transmit sequence number.
-	bool wasempty = tqueue.isEmpty();
 	int i = tqueue.size();
 	while (i > 0 && tqueue[i-1].tsn > pkt.tsn)
 		i--;
 	tqueue.insert(i, pkt);
 
 	// If we don't have a flow, just leave it queued until we do.
-	if (state == Disconnected || state == WaitFlow)
-		return;
+	if (!tcuratt)
+		return tattach();
+	StreamFlow *flow = tcuratt->flow;
 	Q_ASSERT(flow && flow->isActive());
 
 	// Add our stream to our flow's transmit queue
-	if (wasempty)
-		flow->enqueueStream(this);
+	txenqflow();
 
 	// Prod the flow to transmit immediately if possible
 	if (flow->mayTransmit())
 		flow->readyTransmit();
 }
 
-void BaseStream::acked(const Packet &)
+void BaseStream::txenqflow()
+{
+	if (!tcuratt)
+		return tattach();
+
+	Q_ASSERT(tcuratt->flow);
+	if (!tqueue.isEmpty() && !tqflow) {
+		tcuratt->flow->enqueueStream(this);
+		tqflow = true;
+	}
+}
+
+// Called by StreamFlow::readyTransmit()
+// to transmit or retransmit one packet on a given flow.
+// That packet might have to be an attach packet
+// if we haven't finished attaching yet.
+void BaseStream::transmit(StreamFlow *flow)
+{
+	Q_ASSERT(tqflow);
+	Q_ASSERT(tcuratt != NULL);
+	Q_ASSERT(flow == tcuratt->flow);
+	Q_ASSERT(!tqueue.isEmpty());
+
+	tqflow = false;	// flow just dequeued us
+
+	if (tcuratt->isAcked()) {
+		// Our attachment has been acknowledged:
+		// an ordinary data packet will do fine.
+		Q_ASSERT(!init);
+		Q_ASSERT(tcuratt->isActive());
+
+		// Dequeue and transmit the next data packet.
+		Packet p = tqueue.dequeue();
+
+		// Datagrams get special handling.
+		if (p.type == DatagramPacket)
+			return txDatagram(p);
+
+		// Dequeue and transmit the next data packet.
+		Q_ASSERT(p.type == DataPacket);
+		Q_ASSERT(hdrlenData == Flow::hdrlen + sizeof(DataHeader));
+		DataHeader *hdr = (DataHeader*)(p.buf.data() + Flow::hdrlen);
+		hdr->sid = htons(tcuratt->sid);
+		hdr->type = (DataPacket << typeShift) |
+				(hdr->type & dataAllFlags);
+			// (flags already set - preserve)
+		hdr->win = rwinbyte;
+		hdr->tsn = htonl(p.tsn);		// Note: 32-bit TSN
+		return txData(p);
+	}
+
+	// See if we can potentially use an optimized attach/data packet;
+	// this only works for regular stream data, not datagrams,
+	// and only within the first 2^16 bytes of the stream.
+	Packet &hp = tqueue.head();
+	if (hp.type == DataPacket && hp.tsn <= 0xffff) {
+
+		// See if we can attach stream using an optimized Init packet,
+		// allowing us to indicate the parent with a short 16-bit LSID
+		// and piggyback useful data onto the packet.
+		// The parent must be attached to the same flow.
+		// XX probably should use some state invariant
+		// in place of all these checks.
+		if (toplev)
+			parent = &flow->root;
+		if (init && parent && parent->tcuratt
+				&& parent->tcuratt->flow == flow
+				&& parent->tcuratt->isActive()
+				&& usid.chanId == flow->txChannelId()
+				&& (quint16)usid.streamCtr == tcuratt->sid) {
+			//qDebug() << "sending Init packet";
+			return txAttachData(InitPacket, parent->tcuratt->sid);
+		}
+
+		// See if our peer has this stream in its SID space,
+		// allowing us to attach using an optimized Reply packet.
+		for (int i = 0; i < maxAttach; i++) {
+			if (ratt[i].flow == flow && ratt[i].isActive()) {
+				//qDebug() << "sending Reply packet";
+				return txAttachData(ReplyPacket, ratt[i].sid);
+			}
+		}
+	}
+
+	// We've exhausted all of our optimized-path options:
+	// we have to send a specialized Attach packet instead of useful data.
+	txAttach();
+
+	// Don't requeue onto our flow at this point -
+	// we can't transmit any data until we get that ack!
+}
+
+void BaseStream::txAttachData(PacketType type, StreamId refsid)
+{
+	Packet p = tqueue.dequeue();
+	Q_ASSERT(p.type == DataPacket);		// caller already checked
+	Q_ASSERT(p.tsn <= 0xffff);		// caller already checked
+	Q_ASSERT(hdrlenInit == Flow::hdrlen + sizeof(InitHeader));
+
+	// Build the InitHeader.
+	InitHeader *hdr = (InitHeader*)(p.buf.data() + Flow::hdrlen);
+	hdr->sid = htons(tcuratt->sid);
+	hdr->type = (type << typeShift) | (hdr->type & dataAllFlags);
+			// (flags already set - preserve)
+	hdr->win = rwinbyte;
+	hdr->rsid = htons(refsid);
+	hdr->tsn = htons(p.tsn);		// Note: 16-bit TSN
+
+	// Transmit
+	return txData(p);
+}
+
+void BaseStream::txData(Packet &p)
+{
+	StreamFlow *flow = tcuratt->flow;
+
+	// Transmit the packet on our current flow.
+	quint64 pktseq;
+	flow->flowTransmit(p.buf, pktseq);
+	Q_ASSERT(pktseq);	// XXX
+	//qDebug() << strm << "tx " << pktseq
+	//	<< "posn" << p.tsn << "size" << p.buf.size();
+
+	// Save the data packet in the flow's ackwait hash.
+	flow->ackwait.insert(pktseq, p);
+
+	// Re-queue us on our flow immediately
+	// if we still have more data to send.
+	return txenqflow();
+}
+
+void BaseStream::txDatagram(Packet &p)
+{
+	//qDebug() << this << "txDatagram";
+
+	// Transmit the whole the datagram immediately,
+	// so that all fragments get consecutive packet sequence numbers.
+	quint8 isend;
+	while (true) {
+		Q_ASSERT(p.type == DatagramPacket);
+		DatagramHeader *hdr = (DatagramHeader*)
+						(p.buf.data() + Flow::hdrlen);
+		isend = hdr->type & dgramEndFlag;
+		hdr->sid = htons(tcuratt->sid);
+		hdr->win = rwinbyte;
+
+		// Transmit this datagram packet,
+		// but don't save it anywhere - just fire & forget.
+		quint64 pktseq;
+		tcuratt->flow->flowTransmit(p.buf, pktseq);
+
+		if (isend)
+			break;
+
+		p = tqueue.dequeue();
+	}
+
+	// Re-queue us on our flow immediately
+	// if we still have more data to send.
+	return txenqflow();
+}
+
+void BaseStream::txAttach()
+{
+	qDebug() << this << "transmit Attach packet";
+	StreamFlow *flow = tcuratt->flow;
+	Q_ASSERT(!usid.isNull());	// XXX am I sure this holds here?
+	Q_ASSERT(!pusid.isNull());	// XXX am I sure this holds here?
+
+	// What slot are we trying to attach with?
+	unsigned slot = tcuratt - tatt;
+	Q_ASSERT(slot < (unsigned)maxAttach);
+	Q_ASSERT(attachSlotMask == maxAttach-1);
+
+	// Build the Attach packet header
+	Packet p(this, AttachPacket);
+	p.buf.resize(hdrlenAttach);
+	AttachHeader *hdr = (AttachHeader*)(p.buf.data() + Flow::hdrlen);
+	hdr->sid = htons(tcuratt->sid);
+	hdr->type = (AttachPacket << typeShift) | (init ? attachInitFlag : 0)				| slot;
+	hdr->win = rwinbyte;
+
+	// The body of the Attach packet is the stream's full USID,
+	// and the parent's USID too if we're still initiating the stream.
+	QByteArray bodybuf;
+	XdrStream bodyxs(&bodybuf, QIODevice::WriteOnly);
+	bodyxs << usid;
+	if (init)
+		bodyxs << pusid;
+	p.buf.append(bodybuf);
+
+	// Transmit it on the current flow.
+	quint64 pktseq;
+	flow->flowTransmit(p.buf, pktseq);
+
+	// Save the attach packet in the flow's ackwait hash,
+	// so that we'll be notified when the attach packet gets acked.
+	flow->ackwait.insert(pktseq, p);
+}
+
+void BaseStream::txReset(StreamFlow */*flow*/, quint16 /*sid*/,
+			quint8 /*flags*/)
+{
+	Q_ASSERT(0);	// XXX
+}
+
+void BaseStream::acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq)
 {
 	//qDebug() << "BaseStream::acked packet of size" << pkt.buf.size();
-}
 
-void BaseStream::missed(const Packet &pkt)
-{
-	qDebug() << "Stream::missed packet at" << pkt.tsn
-		<< "size" << pkt.buf.size();
+	switch (pkt.type) {
+	case DataPacket:
+	case AttachPacket:
+		if (tcuratt && tcuratt->flow == flow && !tcuratt->isAcked()) {
+			// We've gotten our first ack for a new attachment.
+			// Save the rxseq the ack came in on
+			// as the attachment's reference pktseq.
+			qDebug() << this << "got attach ack" << rxseq;
+			tcuratt->setActive(rxseq);
+			init = false;
 
-	if (!pkt.dgram) {
-		//qDebug() << "Retransmit packet of size" << pkt.buf.size();
-		txqueue(pkt);	// Retransmit reliable segments
-	}
-}
+			// Normal data transmission may now proceed.
+			txenqflow();
 
-BaseStream *BaseStream::rxinit(StreamID nsid)
-{
-	if (!(nsid & sidOrigin)) {
-		qDebug("rxInit: other side trying to create MY sid!");
-		return NULL;		// XX send back reset
-	}
-
-	// See if the indicated substream already exists.
-	BaseStream *nstrm = flow->idhash.value(nsid);
-	if (nstrm) {
-		if (nstrm->parent != this) {
-			qDebug("rxInit: incorrect parent/child relationship");
-			return NULL;	// XX Protocol error: close flow?
+			// Notify anyone interested that we're attached.
+			attached();
+			if (strm && state == Connected)
+				strm->linkUp();
 		}
-		return nstrm;
+		break;
+	case AckPacket:
+		// nothing to do
+		break;
+	// XXX case DetachPacket:
+	// XXX case ResetPacket:
+	default:
+		qDebug() << this << "got ack for unknown packet" << pkt.type;
 	}
-
-	// Need to create the child stream - make sure we're allowed to.
-	if (!isListening()) {
-		qDebug("rxInit: other side trying to create substream, "
-			"we're not listening.");
-		return NULL;
-	}
-
-	nstrm = new BaseStream(h);
-	nstrm->parent = this;
-	nstrm->peerid = peerid;
-	if (!flow->attach(nstrm, nsid)) {
-		qDebug("rxinit: could not attach incoming stream to flow");
-		return NULL;
-	}
-
-	if (this == &flow->root)
-		nstrm->state = Accepting;	// Service request expected
-	else {
-		nstrm->state = Connected;
-		rsubs.enqueue(nstrm);
-		connect(nstrm, SIGNAL(readyReadMessage()),
-			this, SLOT(subReadMessage()));
-		if (strm)
-			strm->newSubstream();
-	}
-	return nstrm;
 }
 
-void BaseStream::rxSegment(RxSegment &rseg)
+void BaseStream::missed(StreamFlow *flow, const Packet &pkt)
 {
+	//qDebug() << this << "missed bsn" << pkt.tsn
+	//	<< "size" << pkt.buf.size();
+
+	switch (pkt.type) {
+	case DataPacket:
+		qDebug() << this << "retransmit bsn" << pkt.tsn
+			<< "size" << pkt.buf.size() - hdrlenData;
+		txqueue(pkt);	// Retransmit reliable segments
+		break;
+	case AttachPacket:
+		qDebug() << "Attach packet lost: retransmitting";
+		txenqflow();
+		break;
+	default:
+		qDebug() << this << "missed unknown packet" << pkt.type;
+		break;
+	}
+}
+
+// Main packet receive entrypoint, called from StreamFlow::flowReceive()
+bool BaseStream::receive(qint64 pktseq, QByteArray &pkt, StreamFlow *flow)
+{
+	if (pkt.size() < hdrlenMin) {
+		qDebug("BaseStream::receive: got runt packet");
+		return false;	// XX Protocol error: close flow?
+	}
+	StreamHeader *hdr = (StreamHeader*)(pkt.data() + Flow::hdrlen);
+
+	// Handle the packet according to its type
+	switch ((PacketType)(hdr->type >> typeShift)) {
+	case InitPacket:	return rxInitPacket(pktseq, pkt, flow);
+	case ReplyPacket:	return rxReplyPacket(pktseq, pkt, flow);
+	case DataPacket:	return rxDataPacket(pktseq, pkt, flow);
+	case DatagramPacket:	return rxDatagramPacket(pktseq, pkt, flow);
+	case AckPacket:		return rxAckPacket(pktseq, pkt, flow);
+	case ResetPacket:	return rxResetPacket(pktseq, pkt, flow);
+	case AttachPacket:	return rxAttachPacket(pktseq, pkt, flow);
+	case DetachPacket:	return rxDetachPacket(pktseq, pkt, flow);
+	default:
+		qDebug("BaseStream::receive: unknown packet type %x",
+			hdr->type);
+		return false;	// XX Protocol error: close flow?
+	};
+}
+
+bool BaseStream::rxInitPacket(quint64 pktseq, QByteArray &pkt, StreamFlow *flow)
+{
+	if (pkt.size() < hdrlenInit) {
+		qDebug("BaseStream::receive: got runt packet");
+		return false;	// XX Protocol error: close flow?
+	}
+	InitHeader *hdr = (InitHeader*)(pkt.data() + Flow::hdrlen);
+
+	// Look up the stream - if it already exists,
+	// just dispatch it directly as if it were a data packet.
+	StreamId sid = ntohs(hdr->sid);
+	Attachment *att = flow->rxsids.value(sid);
+	if (att != NULL) {
+		if (pktseq < att->sidseq)
+			att->sidseq = pktseq;	// earlier Init; that's OK.
+		att->strm->rxData(pkt, ntohs(hdr->tsn));
+		return true;	// Acknowledge the packet
+	}
+
+	// Doesn't yet exist - look up the parent stream.
+	quint16 psid = ntohs(hdr->rsid);
+	Attachment *patt = flow->rxsids.value(psid);
+	if (patt == NULL) {
+		// The parent SID is in error, so reset that SID.
+		// Ack the pktseq first so peer won't ignore the reset!
+		qDebug("rxInitPacket: unknown parent stream ID");
+		flow->received(pktseq, false);
+		txReset(flow, psid, resetDirFlag);
+		return false;
+	}
+	if (pktseq < patt->sidseq) {
+		qDebug() << "rxInitPacket: stale wrt parent sidseq";
+		return false;	// silently drop stale packet
+	}
+	BaseStream *pbs = patt->strm;
+
+	// Extrapolate the sender's stream counter from the new SID it sent,
+	// and use it to form the new stream's USID.
+	StreamCtr ctr = flow->rxctr + (qint16)(sid - (qint16)flow->rxctr);
+	UniqueStreamId usid(ctr, flow->rxChannelId());
+
+	// Create the new substream.
+	BaseStream *nbs = pbs->rxSubstream(pktseq, flow, sid, 0, usid);
+	if (nbs == NULL)
+		return false;	// substream creation failed
+
+	// Now process any data segment contained in this Init packet.
+	nbs->rxData(pkt, ntohs(hdr->tsn));
+
+	return false;	// Already acknowledged in rxSubstream().
+}
+
+BaseStream *BaseStream::rxSubstream(
+		quint64 pktseq, StreamFlow *flow,
+		quint16 sid, unsigned slot, const UniqueStreamId &usid)
+{
+	// Make sure we're allowed to create a child stream.
+	if (!isListening()) {
+		// The parent SID is not in error, so just reset the new child.
+		// Ack the pktseq first so peer won't ignore the reset!
+		qDebug("rxInitPacket: other side trying to create substream, "
+			"but we're not listening.");
+		flow->received(pktseq, false);
+		txReset(flow, sid, resetDirFlag);
+		return NULL;
+	}
+
+	// Mark the Init packet received now, before transmitting the Reply;
+	// otherwise the Reply won't acknowledge the Init
+	// and the peer will reject it as a stale packet.
+	flow->received(pktseq, true);
+
+	// Create the child stream.
+	BaseStream *nbs = new BaseStream(flow->host(), peerid, this);
+
+	// We'll accept the new stream: this is the point of no return.
+	qDebug() << nbs << "accepting stream" << usid;
+
+	// Extrapolate the sender's stream counter from the new SID it sent.
+	StreamCtr ctr = flow->rxctr + (qint16)(sid - (qint16)flow->rxctr);
+	if (ctr > flow->rxctr)
+		flow->rxctr = ctr;
+
+	// Use this stream counter to form the new stream's USID.
+	nbs->setUsid(usid);
+
+	// Automatically attach the child via its appropriate receive-slot.
+	nbs->ratt[slot].setActive(flow, sid, pktseq);
+
+	// If this is a new top-level application stream,
+	// we expect a service request before application data.
+	if (this == &flow->root) {
+		nbs->state = Accepting;	// Service request expected
+	} else {
+		nbs->state = Connected;
+		this->rsubs.enqueue(nbs);
+		connect(nbs, SIGNAL(readyReadMessage()),
+			this, SLOT(subReadMessage()));
+		if (this->strm)
+			this->strm->newSubstream();
+	}
+
+	return nbs;
+}
+
+bool BaseStream::rxReplyPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow)
+{
+	if (pkt.size() < hdrlenReply) {
+		qDebug("BaseStream::receive: got runt packet");
+		return false;	// XX Protocol error: close flow?
+	}
+	ReplyHeader *hdr = (ReplyHeader*)(pkt.data() + Flow::hdrlen);
+
+	// Look up the stream - if it already exists,
+	// just dispatch it directly as if it were a data packet.
+	StreamId sid = ntohs(hdr->sid);
+	Attachment *att = flow->rxsids.value(sid);
+	if (att != NULL) {
+		if (pktseq < att->sidseq)
+			att->sidseq = pktseq;	// earlier Reply; that's OK.
+		att->strm->rxData(pkt, ntohs(hdr->tsn));
+		return true;	// Acknowledge the packet
+	}
+
+	// Doesn't yet exist - look up the reference stream in our SID space.
+	quint16 rsid = ntohs(hdr->rsid);
+	Attachment *ratt = flow->txsids.value(rsid);
+	if (ratt == NULL) {
+		// The reference SID supposedly in our own space is invalid!
+		// Respond with a reset indicating that SID in our space.
+		// Ack the pktseq first so peer won't ignore the reset!
+		qDebug("rxReplyPacket: unknown reference stream ID");
+		flow->received(pktseq, false);
+		txReset(flow, rsid, 0);
+		return false;
+	}
+	if (pktseq < ratt->sidseq) {
+		qDebug() << "rxReplyPacket: stale - pktseq" << pktseq
+			<< "sidseq" << ratt->sidseq;
+		return false;	// silently drop stale packet
+	}
+	BaseStream *bs = ratt->strm;
+
+	qDebug() << bs << "accepting reply" << bs->usid;
+
+	// OK, we have the stream - just create the receive-side attachment.
+	bs->ratt[0].setActive(flow, sid, pktseq);
+
+	// Now process any data segment contained in this Init packet.
+	bs->rxData(pkt, ntohs(hdr->tsn));
+
+	return true;	// Acknowledge the packet
+}
+
+bool BaseStream::rxDataPacket(quint64 pktseq, QByteArray &pkt, StreamFlow *flow)
+{
+	if (pkt.size() < hdrlenData) {
+		qDebug("BaseStream::receive: got runt packet");
+		return false;	// XX Protocol error: close flow?
+	}
+	DataHeader *hdr = (DataHeader*)(pkt.data() + Flow::hdrlen);
+
+	// Look up the stream the data packet belongs to.
+	quint16 sid = ntohs(hdr->sid);
+	Attachment *att = flow->rxsids.value(sid);
+	if (att == NULL) {
+		// Respond with a reset for the unknown stream ID.
+		// Ack the pktseq first so peer won't ignore the reset!
+		qDebug("rxDataPacket: unknown stream ID");
+		flow->received(pktseq, false);
+		txReset(flow, sid, resetDirFlag);
+		return false;
+	}
+	if (pktseq < att->sidseq) {
+		qDebug() << "rxDataPacket: stale wrt sidseq";
+		return false;	// silently drop stale packet
+	}
+
+	// Process the data, using the full 32-bit TSN.
+	att->strm->rxData(pkt, ntohl(hdr->tsn));
+
+	return true;	// Acknowledge the packet
+}
+
+void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
+{
+	//qDebug() << this << "rxData" << byteseq
+	//	<< (pkt.size() - hdrlenData);
+
+	RxSegment rseg;
+	rseg.rsn = byteseq;
+	rseg.buf = pkt;
+	rseg.hdrlen = hdrlenData;
+
 	if (endread) {
 		// Ignore anything we receive past end of stream
 		// (which we may have forced from our end via close()).
@@ -296,7 +908,8 @@ void BaseStream::rxSegment(RxSegment &rseg)
 	}
 
 	int segsize = rseg.segmentSize();
-	//qDebug() << "Received segment at" << rseg.rsn << "size" << segsize;
+	//qDebug() << this << "received" << rseg.rsn << "size" << segsize
+	//	<< "flags" << rseg.flags() << "stream-rsn" << rsn;
 
 	// See where this packet fits in
 	int rsndiff = rseg.rsn - rsn;
@@ -327,6 +940,7 @@ void BaseStream::rxSegment(RxSegment &rseg)
 		rmsgavail += actsize;
 		if ((rseg.flags() & (dataMessageFlag | dataCloseFlag))
 				&& (rmsgavail > 0)) {
+			qDebug() << this << "received message";
 			rmsgsize.enqueue(rmsgavail);
 			rmsgavail = 0;
 		}
@@ -431,81 +1045,147 @@ void BaseStream::rxSegment(RxSegment &rseg)
 	}
 }
 
-void BaseStream::rxInitPacket(const QByteArray &pkt)
+bool BaseStream::rxDatagramPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow)
 {
-	const InitHeader *hdr = (const InitHeader*)(pkt.data() + Flow::hdrlen);
-	int size = pkt.size() - hdrlenInit;
-	if (size < 0) {
-		qDebug("rxInitPacket: runt packet");
-		return;	// XX Protocol error: close flow?
+	if (pkt.size() < hdrlenDatagram) {
+		qDebug("BaseStream::receive: got runt packet");
+		return false;	// XX Protocol error: close flow?
 	}
+	DatagramHeader *hdr = (DatagramHeader*)(pkt.data() + Flow::hdrlen);
 
-	// We're the parent stream.  Find or create the new child substream.
-	StreamID nsid = ntohs(hdr->nsid) ^ sidOrigin;
-	BaseStream *nstrm = rxinit(nsid);
-	if (!nstrm)
-		return;
-
-	// Build the packet descriptor.
-	RxSegment rseg;
-	rseg.rsn = ntohs(hdr->tsn);	// Note: 16-bit TSN
-	rseg.buf = pkt;
-	rseg.hdrlen = hdrlenInit;
-	nstrm->rxSegment(rseg);
-}
-
-void BaseStream::rxDataPacket(const QByteArray &pkt)
-{
-	const DataHeader *hdr = (const DataHeader*)(pkt.data() + Flow::hdrlen);
-	int size = pkt.size() - hdrlenData;
-	if (size < 0) {
-		qDebug("rxDataPacket: runt packet");
-		return;	// XX Protocol error: close flow?
+	// Look up the stream for which the datagram is a substream.
+	quint16 sid = ntohs(hdr->sid);
+	Attachment *att = flow->rxsids.value(sid);
+	if (att == NULL) {
+		// Respond with a reset for the unknown stream ID.
+		// Ack the pktseq first so peer won't ignore the reset!
+		resetsid:
+		qDebug("rxDatagramPacket: unknown stream ID");
+		flow->received(pktseq, false);
+		txReset(flow, sid, resetDirFlag);
+		return false;
 	}
+	if (pktseq < att->sidseq)
+		return false;	// silently drop stale packet
+	BaseStream *bs = att->strm;
 
-	// Build the packet descriptor.
-	RxSegment rseg;
-	rseg.rsn = ntohl(hdr->tsn);	// Note: 32-bit TSN
-	rseg.buf = pkt;
-	rseg.hdrlen = hdrlenData;
-	rxSegment(rseg);
-}
-
-void BaseStream::rxDatagramPacket(const QByteArray &pkt)
-{
-	if (state != Connected)
-		return;		// Only accept datagrams while connected
-
-	const DatagramHeader *hdr = (const DatagramHeader*)
-					(pkt.data() + Flow::hdrlen);
-	int size = pkt.size() - hdrlenDatagram;
-	if (size < 0) {
-		qDebug("rxDatagramPacket: runt packet");
-		return;	// XX Protocol error: close flow?
-	}
+	if (bs->state != Connected)
+		goto resetsid;	// Only accept datagrams while connected
 
 	int flags = hdr->type;
 	//qDebug() << "rxDatagramSegment" << segsize << "type" << type;
 
 	if (!(flags & dgramBeginFlag) || !(flags & dgramEndFlag)) {
 		qWarning("OOPS, don't yet know how to reassemble datagrams");
-		return;
+		return false;	// XXX
 	}
 
 	// Build a pseudo-Stream object encapsulating the datagram.
-	DatagramStream *dg = new DatagramStream(h, pkt, hdrlenDatagram);
-	rsubs.enqueue(dg);
+	DatagramStream *dg = new DatagramStream(bs->h, pkt, hdrlenDatagram);
+	bs->rsubs.enqueue(dg);
 	// Don't need to connect to the sub's readyReadMessage() signal
 	// because we already know the sub is completely received...
-	if (strm) {
-		strm->newSubstream();
-		strm->readyReadDatagram();
+	if (bs->strm) {
+		bs->strm->newSubstream();
+		bs->strm->readyReadDatagram();
 	}
+
+	return true;	// Acknowledge the packet
 }
 
-void BaseStream::rxResetPacket(const QByteArray &)
+bool BaseStream::rxAckPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow)
+{
+	// XXX use flow control info
+
+	// Count this explicit ack packet as received,
+	// but do NOT send another ack just to ack this ack!
+	flow->received(pktseq, false);
+	return false;
+}
+
+bool BaseStream::rxResetPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow)
 {
 	Q_ASSERT(0);	// XXX
+	return false;
+}
+
+bool BaseStream::rxAttachPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow)
+{
+	qDebug() << "rxAttachPacket size" << pkt.size();
+	if (pkt.size() < hdrlenDatagram) {
+		qDebug("BaseStream::rxAttachPacket: got runt packet");
+		return false;	// XX Protocol error: close flow?
+	}
+
+	// Decode the packet header
+	AttachHeader *hdr = (AttachHeader*)(pkt.data() + Flow::hdrlen);
+	quint16 sid = ntohs(hdr->sid);
+	unsigned init = hdr->type & attachInitFlag;
+	unsigned slot = hdr->type & attachSlotMask;
+	Q_ASSERT(attachSlotMask == maxAttach-1);
+
+	// Decode the USID(s) in the body
+	XdrStream xs(&pkt, QIODevice::ReadOnly);
+	xs.skipRawData(hdrlenAttach);
+	UniqueStreamId usid, pusid;
+	xs >> usid;
+	if (init)
+		xs >> pusid;
+	if (xs.status() != xs.Ok || usid.isNull() || (init && pusid.isNull())) {
+		qDebug("BaseStream::rxAttachPacket: invalid attach packet");
+		return false;	// XX protocol error - close flow?
+	}
+
+	// First try to look up the stream by its own USID.
+	StreamPeer *peer = flow->peer;
+	BaseStream *bs = peer->usids.value(usid);
+	if (bs != NULL) {
+		// Found it: the stream already exists, just attach it.
+		RxAttachment &rslot = bs->ratt[slot];
+		if (rslot.isActive()) {
+			if (rslot.flow == flow &&
+					rslot.sid == sid) {
+				qDebug() << bs << "redundant attach"
+					<< bs->usid;
+				rslot.sidseq = qMin(rslot.sidseq, pktseq);
+				return true;
+			}
+			qDebug() << bs << "replacing attach slot" << slot;
+			rslot.clear();
+		}
+		qDebug() << bs << "accepting attach" << bs->usid;
+		rslot.setActive(flow, sid, pktseq);
+		return true;
+	}
+
+	// Stream doesn't exist - lookup parent if it's an init-attach.
+	BaseStream *pbs = NULL;
+	if (init)
+		pbs = peer->usids.value(pusid);
+	if (pbs != NULL) {
+		// Found it: create and attach a child stream.
+		bs = pbs->rxSubstream(pktseq, flow, sid, slot, usid);
+		if (bs == NULL)
+			return false;	// Substream creation failed
+		return false;	// Already acked in rxSubstream()
+	}
+
+	// No way to attach the stream - just reset it.
+	qDebug() << "rxAttachPacket: unknown stream" << usid;
+	flow->received(pktseq, false);
+	txReset(flow, sid, resetDirFlag);
+	return false;
+}
+
+bool BaseStream::rxDetachPacket(quint64 pktseq, QByteArray &pkt,
+				StreamFlow *flow)
+{
+	Q_ASSERT(0);	// XXX
+	return false;
 }
 
 int BaseStream::readData(char *data, int maxSize)
@@ -595,46 +1275,6 @@ QByteArray BaseStream::readMessage(int maxSize)
 	return buf;
 }
 
-// Called by StreamFlow::readyTransmit()
-// to prepare a data segment's packet headers
-// for transmission (or retrasmission) on a given flow.
-// We need to do this afresh on each retransmission
-// because for example a segment first sent as an Init packet
-// might later need to get retransmitted as a regular Data packet.
-void BaseStream::txPrepare(Packet &p, StreamFlow *)
-{
-	if (p.dgram) {
-		return;	// Everything already filled in
-	}
-
-	if (mature) {
-
-		// Build the DataHeader.
-		Q_ASSERT(hdrlenData == Flow::hdrlen + sizeof(DataHeader));
-		DataHeader *hdr = (DataHeader*)(p.buf.data() + Flow::hdrlen);
-		hdr->sid = htons(sid);
-		hdr->type = (DataPacket << typeShift) |
-				(hdr->type & dataAllFlags);
-			// (flags already set - preserve)
-		hdr->win = rwinbyte;
-		hdr->tsn = htonl(p.tsn);		// Note: 32-bit TSN
-
-	} else {
-
-		// Build the InitHeader.
-		Q_ASSERT(hdrlenInit == Flow::hdrlen + sizeof(InitHeader));
-		InitHeader *hdr = (InitHeader*)(p.buf.data() + Flow::hdrlen);
-		hdr->sid = htons(parent->sid);
-		hdr->type = (InitPacket << typeShift) |
-				(hdr->type & dataAllFlags);
-			// (flags already set - preserve)
-		hdr->win = rwinbyte;
-		hdr->nsid = htons(sid);
-		hdr->tsn = htons(p.tsn);		// Note: 16-bit TSN
-		Q_ASSERT(tsn <= 0xffff);
-	}
-}
-
 int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 {
 	Q_ASSERT(!endwrite);
@@ -650,8 +1290,7 @@ int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 		//qDebug() << "Transmit segment at" << tsn << "size" << size;
 
 		// Build the appropriate packet header.
-		Packet p;
-		p.strm = this;
+		Packet p(this, DataPacket);
 		p.tsn = tsn;
 		p.buf.resize(hdrlenData + size);
 
@@ -664,17 +1303,13 @@ int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 		p.hdrlen = hdrlenData;
 
 		// Advance the TSN to account for this data.
-		// We must "grow up" when we advance beyond 16 bits.
 		tsn += size;
-		if (tsn > 0xffff)
-			mature = true;
 
 		// Copy in the application payload
 		char *payload = (char*)(hdr+1);
 		memcpy(payload, data, size);
 
 		// Queue up the packet
-		p.dgram = false;
 		txqueue(p);
 
 		// On to the next segment...
@@ -715,8 +1350,7 @@ qint32 BaseStream::writeDatagram(const char *data, qint32 totsize)
 		}
 
 		// Build the appropriate packet header.
-		Packet p;
-		p.strm = this;
+		Packet p(this, DatagramPacket);
 		char *payload;
 
 		// Build the DatagramHeader.
@@ -725,9 +1359,9 @@ qint32 BaseStream::writeDatagram(const char *data, qint32 totsize)
 					+ sizeof(DatagramHeader));
 		DatagramHeader *hdr = (DatagramHeader*)
 					(p.buf.data() + Flow::hdrlen);
-		hdr->sid = htons(sid);
+		// hdr->sid - later
 		hdr->type = (DatagramPacket << typeShift) | flags;
-		hdr->win = rwinbyte;
+		// hdr->win - later
 
 		p.hdrlen = hdrlenDatagram;
 		payload = (char*)(hdr+1);
@@ -736,8 +1370,6 @@ qint32 BaseStream::writeDatagram(const char *data, qint32 totsize)
 		memcpy(payload, data, size);
 
 		// Queue up the packet
-		// XXX ensure that all fregments get consecutive seqnos!
-		p.dgram = true;
 		txqueue(p);
 
 		// On to the next fragment...
@@ -840,26 +1472,8 @@ void BaseStream::disconnect()
 {
 	//qDebug() << "Stream" << this << "disconnected: state" << state;
 
-	switch (state) {
-	case Disconnected:
-		break;
-
-	case WaitFlow: {
-		Q_ASSERT(!peerid.isEmpty());
-		StreamPeer *peer = h->peers.value(peerid);
-		Q_ASSERT(peer != NULL);
-		Q_ASSERT(peer->waiting.contains(this));
-		peer->waiting.remove(this);
-		break; }
-
-	case WaitService:
-	case Accepting:
-	case Connected:
-		Q_ASSERT(flow != NULL);
-		flow->detach(this);
-		break;
-	}
-	Q_ASSERT(flow == NULL);
+	// XXX disconnect from stream
+	//Q_ASSERT(0);
 
 	state = Disconnected;
 	if (strm) {
@@ -871,7 +1485,7 @@ void BaseStream::disconnect()
 #ifndef QT_NO_DEBUG
 void BaseStream::dump()
 {
-	qDebug() << "Stream" << this << "state" << state << "sid" << sid;
+	qDebug() << "Stream" << this << "state" << state;
 	qDebug() << "  TSN" << tsn << "tqueue" << tqueue.size();
 	qDebug() << "  RSN" << rsn << "ravail" << ravail
 		<< "rahead" << rahead.size() << "rsegs" << rsegs.size()

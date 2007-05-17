@@ -33,6 +33,15 @@ static const int DELAY = 55000/2; // uS ping - typ for my DSL connection
 static bool tracepkts = false;
 
 
+// Cheesy way to distinguish "clients" from "servers" in our tests,
+// for purposes of pretty-printing a left/right packet trace:
+// "clients" have IP addresses of the form 1.x.x.x.
+static inline bool isclient(const QHostAddress &addr)
+{
+	return (addr.toIPv4Address() >> 24) == 1;
+}
+
+
 ////////// SimTimerEngine //////////
 
 SimTimerEngine::SimTimerEngine(Simulator *sim, Timer *t)
@@ -75,12 +84,19 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
 			const char *data, int size)
 :	QObject(srch->sim),
 	sim(srch->sim),
-	srch(srch), dsth(srch->sim->hosts.value(dst.addr)),
 	src(src), dst(dst),
 	buf(data, size), timer(srch, this)
 {
-	Q_ASSERT(dsth);
 	Q_ASSERT(srch->addr == src.addr);
+
+	// Make sure the destination host exists - drop it otherwise
+	SimHost *dsth = sim->hosts.value(dst.addr);
+	if (!dsth) {
+		qDebug() << this << "nonexistent target host"
+			<< dst.addr.toString();
+		deleteLater();
+		return;
+	}
 
 	// Compute the amount of wire time this packet takes to transmit,
 	// including some per-packet link/inet overhead
@@ -97,12 +113,14 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
 
 	quint32 seqno = ntohl(*(quint32*)buf.data()) & 0xffffff;
 	if (tracepkts)
-	if (src.addr == QHostAddress("1.2.3.4"))
-		printf("%12lld:\t\t     --> %6d %4d --> %4s\n",
-			sim->cur.usecs, seqno, buf.size(), drop ? "DROP" : "");
+	if (isclient(src.addr))
+		qDebug("%12lld:\t\t     --> %6d %4d --> %4s  @%lld",
+			sim->cur.usecs, seqno, buf.size(), drop ? "DROP" : "",
+			drop ? 0 : arrival);
 	else
-		printf("%12lld:\t\t\t\t%4s <-- %6d %4d <--\n",
-			sim->cur.usecs, drop ? "DROP" : "", seqno, buf.size());
+		qDebug("%12lld:\t\t\t\t%4s <-- %6d %4d <--  @%lld",
+			sim->cur.usecs, drop ? "DROP" : "", seqno, buf.size(),
+			drop ? 0 : arrival);
 
 	if (drop) {
 		deleteLater();
@@ -116,15 +134,23 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
 
 void SimPacket::arrive()
 {
+	// Make sure the destination host still exists - drop it otherwise
+	SimHost *dsth = sim->hosts.value(dst.addr);
+	if (!dsth) {
+		qDebug() << this << "target host disappeared"
+			<< dst.addr.toString();
+		return deleteLater();
+	}
+
 	timer.stop();
 
 	quint32 seqno = ntohl(*(quint32*)buf.data()) & 0xffffff;
 	if (tracepkts)
-	if (src.addr == QHostAddress("1.2.3.4"))
-		printf("%12lld:\t\t\t\t\t\t        --> %6d %4d\n",
+	if (isclient(src.addr))
+		qDebug("%12lld:\t\t\t\t\t\t        --> %6d %4d",
 			sim->cur.usecs, seqno, buf.size());
 	else
-		printf("%12lld: %6d %4d <--\n",
+		qDebug("%12lld: %6d %4d <--",
 			sim->cur.usecs, seqno, buf.size());
 
 	SimSocket *dsts = dsth->socks.value(dst.port);
@@ -215,7 +241,7 @@ QString SimSocket::errorString()
 
 ////////// SimHost //////////
 
-SimHost::SimHost(Simulator *sim, QHostAddress addr)
+SimHost::SimHost(Simulator *sim, const QHostAddress &addr)
 :	sim(sim), addr(addr), arrival(0)
 {
 	Q_ASSERT(!sim->hosts.contains(addr));
@@ -253,6 +279,17 @@ Socket *SimHost::newSocket(QObject *parent)
 	return new SimSocket(this, parent);
 }
 
+void SimHost::setHostAddress(const QHostAddress &newaddr)
+{
+	Q_ASSERT(sim->hosts.value(addr) == this);
+	sim->hosts.remove(addr);
+
+	Q_ASSERT(!sim->hosts.contains(newaddr));
+	sim->hosts.insert(newaddr, this);
+
+	addr = newaddr;
+}
+
 
 ////////// Simulator //////////
 
@@ -284,7 +321,9 @@ void Simulator::run()
 		next->timeout();
 
 		// Process any Qt events such as delayed signals
-		QCoreApplication::processEvents();
+		QCoreApplication::processEvents(QEventLoop::DeferredDeletion);
+
+		//qDebug() << "";	// print blank lines at time increments
 	}
 	//qDebug() << "Simulator::run() done";
 }

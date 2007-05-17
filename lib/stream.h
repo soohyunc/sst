@@ -86,6 +86,7 @@ public:
 private:
 	Host		*host;		// Per-host SST state
 	AbstractStream	*as;		// Internal stream control object
+	bool		statconn;	// linkStatusChanged signal connected
 
 
 public:
@@ -175,6 +176,12 @@ public:
 	 * during the logical lifetime of the stream.
 	 */
 	bool isConnected();
+
+	/** Provide a new or additional address hint.
+	 * May be called at any time, e.g., if the target host has migrated,
+	 * to give SST a hint at where it might find the target
+	 * in order to re-establish connectivity. */
+	void foundPeerEndpoint(const Endpoint &ep);
 
 
 	////////// Reading Data //////////
@@ -496,6 +503,8 @@ signals:
 	 * upon receiving the linkDown() signal. */
 	void linkDown();
 
+	void linkStatusChanged(LinkStatus status);
+
 	/** Emitted when incoming data has filled our receive window.
 	 * When this situation occurs, the client must read some queued data
 	 * or else increase the maximum receive window
@@ -519,10 +528,18 @@ protected:
 	// Set an error condition on this Stream and emit the error() signal.
 	void setError(const QString &errorString);
 
+	// We override this method to watch our linkStatusChanged() signal.
+	void connectNotify(const char *signal);
+
 private:
 	// Private constructor used internally
 	// to create a Stream wrapper for an existing BaseStream.
 	Stream(AbstractStream *as, QObject *parent);
+
+	// Connect the linkStatusNotify signal to the current peer's -
+	// we do this lazily so that if the app has many streams,
+	// not all of them necessarily have to be watching the peer.
+	void connectLinkStatusChanged();
 };
 
 Q_DECLARE_OPERATORS_FOR_FLAGS(Stream::ShutdownMode)
@@ -689,7 +706,7 @@ public:
 	inline StreamHostState() : rpndr(NULL) { }
 	virtual ~StreamHostState();
 
-	StreamPeer *streamPeer(const QByteArray &id);
+	StreamPeer *streamPeer(const QByteArray &id, bool create = true);
 
 	virtual Host *host() = 0;
 };

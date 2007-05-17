@@ -15,13 +15,15 @@ typedef KeyOptionUnion ?KeyOption;
 
 // Checksum negotiation chunks
 struct KeyChunkChkI1Data {
-	unsigned int	key;		// Checksum key
+	unsigned int	cki;		// Initiator's checksum key
 	unsigned char	chani;		// Initiator's channel number
 	opaque		cookie<>;	// Responder's cookie, if any
 	opaque		ulpi<>;		// Upper-level protocol data
 };
 struct KeyChunkChkR1Data {
-	unsigned int	key;		// Echoed checksum key
+	unsigned int	cki;		// Initiator's checksum key, echoed
+	unsigned int	ckr;		// Responder's checksum key,
+					// = cki if cookie required
 	unsigned char	chanr;		// Responder's channel number,
 					// 0 if cookie required
 	opaque		cookie<>;	// Responder's cookie, if any

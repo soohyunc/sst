@@ -15,96 +15,41 @@ using namespace SST;
 StreamFlow::StreamFlow(Host *h, StreamPeer *peer, const QByteArray &peerid)
 :	Flow(h, peer),
 	peer(peer),
-	root(h),
-	nextsid(1)
+	root(h, peerid, NULL),
+	txctr(1),
+	txackctr(0),
+	rxctr(0)
 {
-	root.state = BaseStream::Connected;
-	root.sid = 0;
-	root.flow = this;
 	root.setParent(NULL);	// XXX
-	idhash.insert(sidRoot, &root);
-	idhash.insert(sidRoot^sidOrigin, &root);
+	root.state = BaseStream::Connected;
+
+	// Pre-attach the root stream to the flow in both directions
+	root.tatt[0].setAttaching(this, sidRoot);
+	root.tatt[0].setActive(1);
+	root.tcuratt = &root.tatt[0];
+
+	root.ratt[0].setActive(this, sidRoot, 1);
+
+	// Listen on the root stream for top-level application streams
 	root.listen();
-	root.peerid = peerid;
+
+	//XXX channel IDs
+
+	connect(this, SIGNAL(linkStatusChanged(LinkStatus)),
+		this, SLOT(gotLinkStatusChanged(LinkStatus)));
 }
 
 StreamFlow::~StreamFlow()
 {
-	//qDebug() << "~StreamFlow to" << remoteEndpoint().toString();
+	qDebug() << this << "~StreamFlow to" << remoteEndpoint().toString()
+		<< "lchan" << localChannel() << "rchan" << remoteChannel();
+
+	disconnect(this, SIGNAL(linkStatusChanged(LinkStatus)),
+		this, SLOT(gotLinkStatusChanged(LinkStatus)));
 
 	stop();
 
-	detach(&root);
-	idhash.remove(sidRoot^sidOrigin);
 	root.state = BaseStream::Disconnected;
-}
-
-StreamProtocol::StreamID StreamFlow::attach(BaseStream *stream, StreamID sid)
-{
-	//qDebug() << "Flow" << this << "attach" << stream;
-
-	Q_ASSERT(stream->flow == NULL);
-	Q_ASSERT(stream->sid == 0);
-
-	if (sid == 0) {
-		// We need to allocate a StreamID for this stream.
-		sid = nextsid;
-
-		Q_ASSERT(sid > 0 && sid < sidOrigin);
-		while (idhash.contains(sid)) {
-			if (++sid >= sidOrigin)
-				sid = 1;
-			if (sid == nextsid) {
-				qDebug("StreamFlow: out of Stream IDs!");
-				return 0;
-			}
-		}
-
-		nextsid = sid+1;
-		if (nextsid >= sidOrigin)
-			nextsid = 1;
-	} else {
-		// The other side initiated the stream,
-		// so it already has a StreamID.
-		Q_ASSERT(sid >= sidOrigin);
-		stream->mature = true;
-	}
-
-	stream->flow = this;
-	stream->sid = sid;
-	idhash.insert(sid, stream);
-
-	return sid;
-}
-
-void StreamFlow::detach(BaseStream *stream)
-{
-	//qDebug() << "Flow" << this << "detach" << stream;
-
-	Q_ASSERT(stream->flow == this);
-	Q_ASSERT(idhash.value(stream->sid) == stream);
-
-	// Break the stream's association with us and free its SID
-	idhash.remove(stream->sid);
-	stream->flow = NULL;
-	stream->sid = 0;
-
-	// Remove the stream from our waiting streams list
-	int rc = dequeueStream(stream);
-	Q_ASSERT(rc <= 1);
-
-	// XXX clear out ackwait
-	foreach (qint64 txseq, ackwait.keys()) {
-		BaseStream::Packet &p = ackwait[txseq];
-		Q_ASSERT(!p.isNull());
-		Q_ASSERT(p.strm);
-		if (p.strm != stream)
-			continue;
-
-		// Move the packet back onto the stream's transmit queue
-		stream->tqueue.enqueue(p);
-		ackwait.remove(txseq);
-	}
 }
 
 void StreamFlow::enqueueStream(BaseStream *strm)
@@ -120,6 +65,43 @@ void StreamFlow::enqueueStream(BaseStream *strm)
 	tstreams.insert(i, strm);
 }
 
+void StreamFlow::detachAll()
+{
+	// Save off and clear the flow's entire ackwait table -
+	// it'll be more efficient to go through it once
+	// and send all the waiting packets back to their streams,
+	// than for each stream to pull out its packets individually.
+	QHash<qint64,BaseStream::Packet> ackbak = ackwait;
+	ackwait.clear();
+
+	// Detach all the streams with transmit-attachments to this flow.
+	foreach (TxAttachment *att, txsids)
+		att->clear();
+	Q_ASSERT(txsids.isEmpty());
+
+	// Finally, send back all the waiting packets to their streams.
+	qDebug() << this << "returning" << ackbak.size() << "packets";
+	foreach (BaseStream::Packet p, ackbak) {
+		Q_ASSERT(!p.isNull());
+		Q_ASSERT(p.strm);
+		p.strm->missed(this, p);
+	}
+}
+
+bool StreamFlow::transmitAck(QByteArray &pkt, quint64 ackseq, unsigned ackct)
+{
+	if (pkt.size() < hdrlenAck)
+		pkt.resize(hdrlenAck);
+	AckHeader *hdr = (AckHeader*)(pkt.data() + Flow::hdrlen);
+	// XX flow control info for some in-use stream
+	hdr->sid = htons(sidRoot);
+	hdr->type = AckPacket << typeShift;
+	hdr->win = 0; // XXX
+
+	// Let flow protocol put together its part of the packet and send it.
+	return Flow::transmitAck(pkt, ackseq, ackct);
+}
+
 void StreamFlow::readyTransmit()
 {
 	if (tstreams.isEmpty())
@@ -127,38 +109,17 @@ void StreamFlow::readyTransmit()
 
 	// Round-robin between our streams for now.
 	do {
+		// Grab the next stream in line to transmit
 		BaseStream *strm = tstreams.dequeue();
 
-		// Dequeue a packet from this stream's transmit queue.
-		Q_ASSERT(!strm->tqueue.isEmpty());
-		BaseStream::Packet p = strm->tqueue.dequeue();
-
-		// Prepare the packet for transmission on this flow,
-		// setting up the header with the correct stream IDs etc.
-		strm->txPrepare(p, this);
-
-		// Transmit it.
-		quint64 pktseq;
-		flowTransmit(p.buf, pktseq);
-		Q_ASSERT(txseq);	// XXX
-		//qDebug() << strm << "tx " << pktseq
-		//	<< "posn" << p.tsn << "size" << p.buf.size();
-
-		// If it's a datagram, drop the buffer; we won't need it.
-		if (p.dgram)
-			p.buf.clear();
-
-		// Save the packet in our global ackwait hash.
-		ackwait.insert(pktseq, p);
-
-		// If this stream still has more to transmit, re-queue it.
-		if (!strm->tqueue.isEmpty())
-			enqueueStream(strm);
+		// Allow it to transmit one packet.
+		// It will add itself back onto tstreams if it has more.
+		strm->transmit(this);
 
 	} while (!tstreams.isEmpty() && mayTransmit());
 }
 
-void StreamFlow::acked(qint64 txseq, int npackets)
+void StreamFlow::acked(quint64 txseq, int npackets, quint64 rxseq)
 {
 	for (; npackets > 0; txseq++, npackets--) {
 		BaseStream::Packet p = ackwait.take(txseq);
@@ -167,12 +128,11 @@ void StreamFlow::acked(qint64 txseq, int npackets)
 
 		//qDebug() << "Got ack for packet" << txseq
 		//	<< "of size" << p.buf.size();
-		Q_ASSERT(p.strm->flow == this);
-		p.strm->acked(p);
+		p.strm->acked(this, p, rxseq);
 	}
 }
 
-void StreamFlow::missed(qint64 txseq, int npackets)
+void StreamFlow::missed(quint64 txseq, int npackets)
 {
 	for (; npackets > 0; txseq++, npackets--) {
 		BaseStream::Packet p = ackwait.take(txseq);
@@ -184,45 +144,23 @@ void StreamFlow::missed(qint64 txseq, int npackets)
 
 		//qDebug() << "Missed packet" << txseq
 		//	<< "of size" << p.buf.size();
-		Q_ASSERT(p.strm->flow == this);
-		p.strm->missed(p);
+		p.strm->missed(this, p);
 	}
 }
 
-void StreamFlow::flowReceive(qint64, QByteArray &pkt)
+bool StreamFlow::flowReceive(qint64 pktseq, QByteArray &pkt)
 {
-	if (pkt.size() < 4) {
-		qDebug("flowReceive: got runt packet");
-		return;	// XX Protocol error: close flow?
-	}
-
-	// Lookup the stream
-	StreamHeader *hdr = (StreamHeader*)(pkt.data() + Flow::hdrlen);
-	StreamID psid = ntohs(hdr->sid) ^ sidOrigin;
-	BaseStream *strm = idhash.value(psid);
-	if (!strm) {
-		qDebug("flowReceive: packet for unknown stream %d", psid);
-		return;	// XX Protocol error: close flow?
-	}
-
-	//qDebug() << "Received packet" << pktseq;
-
-	// Handle the packet according to its type
-	switch ((PacketType)(hdr->type >> typeShift)) {
-	case InitPacket:	strm->rxInitPacket(pkt); return;
-	case DataPacket:	strm->rxDataPacket(pkt); return;
-	case DatagramPacket:	strm->rxDatagramPacket(pkt); return;
-	case ResetPacket:	strm->rxResetPacket(pkt); return;
-	default:
-		qDebug("flowReceive: unknown packet type %d", hdr->type);
-		return;	// XX Protocol error: close flow?
-	};
+	return BaseStream::receive(pktseq, pkt, this);
 }
 
-void StreamFlow::failed()
+void StreamFlow::gotLinkStatusChanged(LinkStatus newstatus)
 {
-	Q_ASSERT(isActive());
+	qDebug() << this << "gotLinkStatusChanged:" << newstatus;
 
+	if (newstatus != LinkDown)
+		return;
+
+	// Link went down indefinitely - self-destruct.
 	StreamPeer *peer = target();
 	Q_ASSERT(peer);
 
@@ -231,7 +169,7 @@ void StreamFlow::failed()
 		qDebug() << "Primary flow to host ID" << peer->id.toBase64()
 			<< "at endpoint" << remoteEndpoint().toString()
 			<< "failed";
-		peer->flow = NULL;
+		peer->clearPrimary();
 	}
 
 	// Stop and destroy this flow.
@@ -239,15 +177,19 @@ void StreamFlow::failed()
 	deleteLater();
 }
 
-void StreamFlow::start()
+void StreamFlow::start(bool initiator)
 {
-	Flow::start();
+	Flow::start(initiator);
 	Q_ASSERT(isActive());
 
+	// Set the root stream's USID based on our channel ID
+	root.usid.chanId = initiator ? txChannelId() : rxChannelId();
+	root.usid.streamCtr = 0;
+	Q_ASSERT(!root.usid.chanId.isNull());
+
 	// If our target doesn't yet have an active flow, use this one.
-	StreamPeer *peer = target();
-	if (peer->flow == NULL)
-		peer->setPrimary(this);
+	// This way we either an incoming or outgoing flow can be a primary.
+	target()->flowStarted(this);
 }
 
 void StreamFlow::stop()
@@ -259,18 +201,13 @@ void StreamFlow::stop()
 	// XXX clean up tstreams, ackwait
 
 	// Detach and notify all affected streams.
-	foreach (BaseStream *strm, idhash) {
-		if (strm == &root)
-			continue;	// Don't detach root streams
-		Q_ASSERT(strm->sid != 0);
-		Q_ASSERT(strm->flow == this);
-
-		// XXX only detach persistent streams
-		strm->fail(tr("Connection to host ID %0 at %1 failed")
-			.arg(QString(target()->remoteHostId().toBase64()))
-			.arg(remoteEndpoint().toString()));
-		Q_ASSERT(strm->flow == NULL);
-		Q_ASSERT(strm->sid == 0);
+	foreach (TxAttachment *att, txsids) {
+		Q_ASSERT(att->flow == this);
+		att->clear();
+	}
+	foreach (RxAttachment *att, rxsids) {
+		Q_ASSERT(att->flow == this);
+		att->clear();
 	}
 }
 

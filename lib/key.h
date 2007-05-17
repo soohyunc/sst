@@ -92,6 +92,7 @@ class KeyInitiator : public QObject
 
 	// Protocol state set up before sending I1
 	State state;
+	bool early;		// Still early enough to cancel asynchronously
 	QByteArray ni, nhi;	// Initiator's nonce, and hashed nonce
 	QByteArray dhi;		// Initiator's DH public key
 
@@ -124,6 +125,16 @@ public:
 	inline Flow *flow() { return fl; }
 	inline bool isDone() { return state == Done; }
 
+	// Returns true if this KeyInitiator hasn't gotten far enough
+	// so that the remote peer might possibly create permanent state
+	// if we cancel the process at our end now.
+	// We use this if we're trying to initiate a connection to a peer
+	// but that peer contacts us first, giving us a primary flow;
+	// we can then abort our outstanding active initiation attempts
+	// ONLY if they're still in an early enough stage that we know
+	// the responder won't be left with a dangling end of a new flow.
+	inline bool isEarly() { return early; }
+
 	inline SocketEndpoint remoteEndpoint() { return sepr; }
 
 	// Set/get the opaque information block to pass to the responder.
@@ -132,6 +143,10 @@ public:
 	// and to setup any upper-layer protocol parameters for the new flow.
 	inline QByteArray info() { return ulpi; }
 	inline void setInfo(const QByteArray &info) { ulpi = info; }
+
+	// Cancel all of this KeyInitiator's activities
+	// (without actually deleting the object just yet).
+	void cancel();
 
 signals:
 	void completed(bool success);

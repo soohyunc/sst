@@ -15,6 +15,7 @@
 #include "srv.h"
 #include "sim.h"
 #include "dgram.h"
+#include "migrate.h"
 
 using namespace SST;
 
@@ -33,6 +34,7 @@ struct RegressionTest {
 } tests[] = {
 	{BasicClient::run, "basic", "Basic stream-oriented data transfer"},
 	{DatagramTest::run, "dgram", "Best-effort datagram data transfer"},
+	{MigrateTest::run, "migrate", "Endpoint migration test"},
 };
 #define NTESTS ((int)(sizeof(tests)/sizeof(tests[0])))
 

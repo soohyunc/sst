@@ -169,7 +169,7 @@ void BasicClient::timeout()
 void BasicClient::reqDone()
 {
 	ndone++;
-	qDebug() << "Request" << ndone << "done";
+	qDebug() << "Request" << ndone << "of" << nsocks << "done";
 	if (ndone == nsocks)
 		success = true;
 }

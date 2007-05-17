@@ -35,7 +35,6 @@ class SimPacket : public QObject
 
 private:
 	Simulator *sim;
-	SimHost *srch, *dsth;
 	Endpoint src, dst;
 	QByteArray buf;
 	Timer timer;
@@ -90,13 +89,21 @@ private:
 	qint64 arrival;
 
 public:
-	SimHost(Simulator *sim, QHostAddress addr);
+	SimHost(Simulator *sim, const QHostAddress &addr);
 	~SimHost();
 
 	virtual Time currentTime();
 	virtual TimerEngine *newTimerEngine(Timer *timer);
 
 	virtual Socket *newSocket(QObject *parent = NULL);
+
+
+	// Return this simulated host's current IP address.
+	inline QHostAddress hostAddress() const { return addr; }
+
+	// Dynamically change this host's IP address,
+	// e.g., to simulate host mobility.
+	void setHostAddress(const QHostAddress &newaddr);
 };
 
 class Simulator : public QObject

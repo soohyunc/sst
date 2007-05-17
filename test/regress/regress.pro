@@ -15,6 +15,6 @@ CONFIG -= app_bundle
 }
 
 # Input sources
-HEADERS += main.h srv.h cli.h dgram.h
-SOURCES += main.cc srv.cc cli.cc dgram.cc
+HEADERS += main.h srv.h cli.h dgram.h migrate.h
+SOURCES += main.cc srv.cc cli.cc dgram.cc migrate.cc
 
