@@ -35,6 +35,7 @@ struct WebImage
 	int pri;
 	QFile *tmpf;
 	bool dirty;
+	bool done;
 
 	inline WebImage()
 		: strm(NULL), pri(0), tmpf(NULL) { }
@@ -64,6 +65,7 @@ public:
 			Simulator *sim = NULL);
 
 private:
+	void sendRequest(int img);
 	void setPri(int img, int pri);
 
 private slots:

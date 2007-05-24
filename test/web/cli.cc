@@ -18,6 +18,10 @@
 using namespace SST;
 
 
+// Number of parallel downloads for legacy mode - 2 is RFC-compliant behavior.
+static const int legacyConns = 2;
+
+
 WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
 			Simulator *sim)
 :	host(host), srvaddr(srvaddr), srvport(srvport), sim(sim),
@@ -160,7 +164,7 @@ void WebClient::reload()
 
 		// Reset the visible image to the special blank image
 		QTextImageFormat ifmt = wi.curs.charFormat().toImageFormat();
-		ifmt.setName("images/blank.png");
+		ifmt.setName("images/black.png");
 		wi.curs.setCharFormat(ifmt);
 
 		// Create a temporary file to load the image into
@@ -170,33 +174,40 @@ void WebClient::reload()
 		if (!wi.tmpf->open(QIODevice::WriteOnly | QIODevice::Truncate))
 			qFatal("Can't write tmp image");
 
-		// Create an SST stream on which to download the image
-		wi.strm = new Stream(host, this);
-		connect(wi.strm, SIGNAL(readyRead()), this, SLOT(readyRead()));
-		strms.insert(wi.strm, i);
+		// Send the image request immediately for prioritization,
+		// or only for the first two images for legacy behavior.
+		if (priocheck->isChecked() || i < legacyConns)
+			sendRequest(i);
 
-		// Connect to the server and send the request
-		wi.strm->connectTo(Ident::fromIpAddress(srvaddr, srvport),
-					"webtest", "basic");
-		wi.strm->writeMessage(wi.name.toAscii());
+		wi.done = false;
 	}
 
 	refreshSoon();
+}
+
+void WebClient::sendRequest(int img)
+{
+	WebImage &wi = images[img];
+	if (wi.strm != NULL)
+		return;
+
+	// Create an SST stream on which to download the image
+	wi.strm = new Stream(host, this);
+	connect(wi.strm, SIGNAL(readyRead()), this, SLOT(readyRead()));
+	strms.insert(wi.strm, img);
+
+	// Connect to the server and send the request
+	wi.strm->connectTo(Ident::fromIpAddress(srvaddr, srvport),
+				"webtest", "basic");
+	wi.strm->writeMessage(wi.name.toAscii());
 }
 
 void WebClient::setPriorities()
 {
 	//qDebug() << "setPriorities";
 
-	if (!priocheck->isChecked()) {
-		// Act like HTTP/1.1 with no prioritization -
-		// we do this simply by giving early requests
-		// higher priority than late requests, in pairs,
-		// to mimic HTTP/1.1 with two concurrent TCP streams.
-		for (int i = 0; i < images.size(); i++)
-			setPri(i, -i/2);
-		return;
-	}
+	if (!priocheck->isChecked())
+		return;		// No prioritization!
 
 	int start = textedit->cursorForPosition(QPoint(0,0)).position();
 	int end = textedit->cursorForPosition(
@@ -211,10 +222,6 @@ void WebClient::setPriorities()
 		bool vis = wi.curs.selectionStart() <= end &&
 				wi.curs.selectionEnd() >= start;
 
-		//QTextImageFormat ifmt = wi.curs.charFormat().toImageFormat();
-		//ifmt.setName(vis ? "images/black.png" : "images/blank.png");
-		//wi.curs.setCharFormat(ifmt);
-
 		// Set the image's priority accordingly
 		setPri(i, vis ? 1 : 0);
 	}
@@ -228,11 +235,6 @@ void WebClient::setPri(int i, int pri)
 
 	// Send a priority change message
 	quint32 msg = htonl(pri);
-#if 0
-	Stream *sub = wi.strm->openSubstream();
-	sub->writeMessage((char*)&msg, 4);
-	sub->deleteLater();
-#endif
 	wi.strm->writeDatagram((char*)&msg, sizeof(msg), true);
 
 	wi.pri = pri;
@@ -257,6 +259,7 @@ void WebClient::readyRead()
 				qDebug() << "img" << win << "done";
 				wi.strm->deleteLater();
 				wi.strm = NULL;
+				wi.done = true;
 			}
 			return;
 		}
@@ -307,6 +310,20 @@ void WebClient::refreshNow()
 		QTextImageFormat ifmt = wi.curs.charFormat().toImageFormat();
 		ifmt.setName(wi.name);
 		wi.curs.setCharFormat(ifmt);
+	}
+
+	// Legacy: fire off new requests after images complete
+	int maxreqs = priocheck->isChecked() ? 9999 : legacyConns;
+	int ncur = 0;
+	for (int i = 0; i < images.size(); i++) {
+		WebImage &wi = images[i];
+		if (wi.done)
+			continue;
+		if (ncur >= maxreqs)
+			break;
+		if (wi.strm == NULL)
+			sendRequest(i);
+		ncur++;
 	}
 }
 
