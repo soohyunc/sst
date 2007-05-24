@@ -619,7 +619,7 @@ void BaseStream::txAttach()
 void BaseStream::txReset(StreamFlow */*flow*/, quint16 /*sid*/,
 			quint8 /*flags*/)
 {
-	Q_ASSERT(0);	// XXX
+	qWarning("XXX txReset NOT IMPLEMENTED YET!!!");
 }
 
 void BaseStream::acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq)
@@ -1324,9 +1324,10 @@ int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 	return actsize;
 }
 
-qint32 BaseStream::writeDatagram(const char *data, qint32 totsize)
+qint32 BaseStream::writeDatagram(const char *data, qint32 totsize,
+				bool reliable)
 {
-	if (totsize > mtu /* XXX maxStatelessDatagram */ )
+	if (reliable || totsize > mtu /* XXX maxStatelessDatagram */ )
 	{
 		// Datagram too large to send using the stateless optimization:
 		// just send it as a regular substream.

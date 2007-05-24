@@ -208,10 +208,10 @@ QByteArray Stream::readDatagram(int maxSize)
 	return as->readDatagram(maxSize);
 }
 
-qint32 Stream::writeDatagram(const char *data, qint32 size)
+qint32 Stream::writeDatagram(const char *data, qint32 size, bool reliable)
 {
 	if (!as) return setError(tr("Stream not connected")), -1;
-	return as->writeDatagram(data, size);
+	return as->writeDatagram(data, size, reliable);
 }
 
 Stream *Stream::openSubstream()

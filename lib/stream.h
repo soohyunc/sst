@@ -305,12 +305,13 @@ public:
 	inline qint64 writeMessage(const QByteArray &msg)
 		{ return writeMessage(msg.data(), msg.size()); }
 
-	// Send and receive unordered, unreliable datagrams on this stream.
+	// Send and receive unordered datagrams on this stream.
+	// Reliability is optional.  (XX use enum instead of bool to choose.)
 	int readDatagram(char *data, int maxSize);
 	QByteArray readDatagram(int maxSize = 1 << 30);
-	int writeDatagram(const char *data, int size);
-	inline int writeDatagram(const QByteArray &dgram)
-		{ return writeDatagram(dgram.data(), dgram.size()); }
+	int writeDatagram(const char *data, int size, bool reliable);
+	inline int writeDatagram(const QByteArray &dgram, bool reliable)
+		{ return writeDatagram(dgram.data(), dgram.size(), reliable); }
 
 
 	// Check for pending datagrams

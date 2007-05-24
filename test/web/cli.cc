@@ -11,14 +11,17 @@
 #include <QToolBar>
 #include <QTextEdit>
 #include <QTextDocument>
+#include <QUrl>
 
 #include "cli.h"
 
 using namespace SST;
 
 
-WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport)
-:	host(host), srvaddr(srvaddr), srvport(srvport)
+WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
+			Simulator *sim)
+:	host(host), srvaddr(srvaddr), srvport(srvport), sim(sim),
+	refresher(host)
 {
 	resize(1000, 700);
 
@@ -31,14 +34,24 @@ WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport)
 	priocheck = new QCheckBox(tr("Prioritize Loads"), this);
 	toolbar->addWidget(priocheck);
 	connect(priocheck, SIGNAL(stateChanged(int)),
-		this, SLOT(setPriorities()));
+		this, SLOT(refreshSoon()));
 
-	QSlider *speedslider = new QSlider(this);
-	speedslider->setOrientation(Qt::Horizontal);
-	toolbar->addWidget(speedslider);
+	// We only get a speed-throttle control on the simulated network.
+	if (sim) {
+		QSlider *speedslider = new QSlider(this);
+		speedslider->setMinimum(10);	// 2^10 = 1024 bytes per sec
+		speedslider->setMaximum(30);	// 2^30 = 1 GByte per sec
+		speedslider->setValue(14);	// 2^14 = 16KB/sec
+		speedslider->setOrientation(Qt::Horizontal);
+		toolbar->addWidget(speedslider);
 
-	QLabel *speedlabel = new QLabel("???KBps", this);
-	toolbar->addWidget(speedlabel);
+		speedlabel = new QLabel(this);
+		toolbar->addWidget(speedlabel);
+
+		connect(speedslider, SIGNAL(valueChanged(int)),
+			this, SLOT(speedSliderChanged(int)));
+		speedSliderChanged(speedslider->value());
+	}
 
 	QFile pagefile("page/index.html");
 	if (!pagefile.open(QIODevice::ReadOnly))
@@ -70,16 +83,12 @@ WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport)
 		QTextImageFormat ifmt = fmt.toImageFormat();
 		//qDebug() << "image" << ifmt.name() << "width" << ifmt.width()
 		//		<< "height" << ifmt.height();
-
-		// Record the name and text position of this image.
-		WebImage wi;
-		wi.curs = curs;
-		wi.name = ifmt.name();
-		images.append(wi);
+		QString name = ifmt.name();
 
 		// Look at the actual image file to get the image's size.
 		// (This is where the horrible cheat occurs.)
-		QImage img("page/" + ifmt.name());
+		QString pagename = "page/" + name;
+		QImage img(pagename);
 		if (img.isNull()) {
 			qDebug() << "couldn't find" << ifmt.name();
 			continue;
@@ -89,8 +98,16 @@ WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport)
 		//ifmt.setName("images/blank.png");
 		//ifmt.setName("page/" + ifmt.name());
 		curs.setCharFormat(ifmt);
+
+		// Record the name and text position of this image.
+		WebImage wi;
+		wi.curs = curs;
+		wi.name = ifmt.name();
+		wi.imgsize = QFile(pagename).size();
+		images.append(wi);
 	}
 
+#if 0
 	// Now that all the image sizes are known
 	// and the document is hopefully formatted correctly,
 	// find where all the images appear in the viewport.
@@ -105,12 +122,17 @@ WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport)
 		wi.rect = rbef.united(raft);
 		qDebug() << "image" << i << "rect" << wi.rect;
 	}
+#endif
+
+	textedit->moveCursor(QTextCursor::Start);
 
 	setCentralWidget(textedit);
 
 	// Watch the text edit box's vertical scroll bar for changes.
 	connect(textedit->verticalScrollBar(), SIGNAL(valueChanged(int)),
-		this, SLOT(setPriorities()));
+		this, SLOT(refreshSoon()));
+
+	connect(&refresher, SIGNAL(timeout(bool)), this, SLOT(refreshNow()));
 
 	// Start loading the images on this page
 	reload();
@@ -159,7 +181,7 @@ void WebClient::reload()
 		wi.strm->writeMessage(wi.name.toAscii());
 	}
 
-	setPriorities();
+	refreshSoon();
 }
 
 void WebClient::setPriorities()
@@ -201,14 +223,17 @@ void WebClient::setPriorities()
 void WebClient::setPri(int i, int pri)
 {
 	WebImage &wi = images[i];
-	if (wi.pri == pri)
+	if (wi.strm == NULL || wi.pri == pri)
 		return;		// no change
 
 	// Send a priority change message
-	Stream *sub = wi.strm->openSubstream();
 	quint32 msg = htonl(pri);
+#if 0
+	Stream *sub = wi.strm->openSubstream();
 	sub->writeMessage((char*)&msg, 4);
 	sub->deleteLater();
+#endif
+	wi.strm->writeDatagram((char*)&msg, sizeof(msg), true);
 
 	wi.pri = pri;
 }
@@ -222,11 +247,13 @@ void WebClient::readyRead()
 	Q_ASSERT(wi.strm == strm);
 
 	while (true) {
-		char buf[8192];
-		int act = wi.strm->readData(buf, sizeof(buf));
+		QByteArray buf;
+		buf.resize(wi.strm->bytesAvailable());
+		int act = wi.strm->readData(buf.data(), buf.size());
 		if (act <= 0) {
 			if (wi.strm->atEnd()) {
 				// Done loading this image!
+				done:
 				qDebug() << "img" << win << "done";
 				wi.strm->deleteLater();
 				wi.strm = NULL;
@@ -234,15 +261,73 @@ void WebClient::readyRead()
 			return;
 		}
 
-		qDebug() << "image" << win << "got" << act << "bytes";
-
 		// Write the image data to the temporary file
 		wi.tmpf->write(buf, act);
+		wi.tmpf->flush();
 
-		// Update the image in the browser window
+		qDebug() << "image" << win << "got" << wi.tmpf->pos()
+			<< "of" << wi.imgsize << "bytes";
+
+		// Update the image in the browser window ASAP
+		wi.dirty = true;
+		refreshSoon();
+
+		// XX shouldn't be necessary!
+		if (wi.tmpf->pos() >= wi.imgsize)
+			goto done;
+	}
+}
+
+void WebClient::refreshSoon()
+{
+	if (!refresher.isActive())
+		refresher.start(100*1000);	 // 1/10th sec
+}
+
+void WebClient::refreshNow()
+{
+	//qDebug() << "refresh";
+	refresher.stop();
+
+	// Send priority change requests
+	setPriorities();
+
+	// Update on-screen images
+	for (int i = 0; i < images.size(); i++) {
+		WebImage &wi = images[i];
+
+		if (!wi.dirty)
+			continue;
+		wi.dirty = false;
+
+		// Load the image from disk
+		QImage img("tmp/" + wi.name);
+		textedit->document()->addResource(QTextDocument::ImageResource,
+						QUrl(wi.name), img);
 		QTextImageFormat ifmt = wi.curs.charFormat().toImageFormat();
-		ifmt.setName("tmp/" + wi.name);
+		ifmt.setName(wi.name);
 		wi.curs.setCharFormat(ifmt);
 	}
+}
+
+void WebClient::speedSliderChanged(int value)
+{
+	Q_ASSERT(value >= 0 && value <= 30);
+	int bw = 1 << value;
+
+	qDebug() << "change network bandwidth:" << bw;
+
+	sim->setNetRate(bw);
+
+	QString str;
+	if (value >= 30)
+		str = tr("%0 GBytes/sec").arg(1 << (value-30));
+	else if (value >= 20)
+		str = tr("%0 MBytes/sec").arg(1 << (value-20));
+	else if (value >= 10)
+		str = tr("%0 KBytes/sec").arg(1 << (value-10));
+	else
+		str = tr("%0 Bytes/sec").arg(1 << value);
+	speedlabel->setText(str);
 }
 

@@ -19,14 +19,14 @@ using namespace SST;
 //static const int DELAY = 120000/2; // uS ping - typ for my DSL connection
 
 // Low-delay DSL connection to MIT
-static const int RATE = 1500000/8; // 1.5Mbps DSL connection
-static const int DELAY = 55000/2; // uS ping - typ for my DSL connection
+//static const int RATE = 1500000/8; // 1.5Mbps DSL connection
+//static const int DELAY = 55000/2; // uS ping - typ for my DSL connection
 
 // 56Mbps 802.11 LAN
 //static const int RATE = 56000000/8; // 56Mbps wireless LAN
 //static const int DELAY = 750/2; // 750uS ping - typ for my DSL connection
 
-#define CUTOFF	(DELAY*10)	// max delay before we drop packets
+//#define CUTOFF	(DELAY*10)	// max delay before we drop packets
 #define PKTOH	32		// Bytes of link/inet overhead per packet
 
 
@@ -98,28 +98,34 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
 		return;
 	}
 
+	qint64 curusecs = sim->currentTime().usecs;
+
 	// Compute the amount of wire time this packet takes to transmit,
 	// including some per-packet link/inet overhead
 	qint64 psize = buf.size() + PKTOH;
-	qint64 ptime = psize * 1000000 / RATE;
+	qint64 ptime = psize * 1000000 / sim->netrate;
+
+	// Nominal arrival time based only on network delay
+	qint64 nomarrival = curusecs + sim->netdelay;
 
 	// Decide when this packet will/would arrive at the destination,
 	// by counting from the minimum ping delay or the last arrival,
 	// whichever is later.
-	qint64 arrival = qMax(sim->cur.usecs + DELAY, dsth->arrival) + ptime;
+	qint64 arrival = qMax(nomarrival, dsth->arrival) + ptime;
 
 	// If the computed arrival time is too late, drop this packet.
-	bool drop = arrival > sim->cur.usecs + CUTOFF;
+	qint64 mtutime = 1200 * 1000000 / sim->netrate;
+	bool drop = arrival > nomarrival + (mtutime * sim->netbufmul);
 
 	quint32 seqno = ntohl(*(quint32*)buf.data()) & 0xffffff;
 	if (tracepkts)
 	if (isclient(src.addr))
 		qDebug("%12lld:\t\t     --> %6d %4d --> %4s  @%lld",
-			sim->cur.usecs, seqno, buf.size(), drop ? "DROP" : "",
+			curusecs, seqno, buf.size(), drop ? "DROP" : "",
 			drop ? 0 : arrival);
 	else
 		qDebug("%12lld:\t\t\t\t%4s <-- %6d %4d <--  @%lld",
-			sim->cur.usecs, drop ? "DROP" : "", seqno, buf.size(),
+			curusecs, drop ? "DROP" : "", seqno, buf.size(),
 			drop ? 0 : arrival);
 
 	if (drop) {
@@ -129,7 +135,7 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
 	dsth->arrival = arrival;
 
 	connect(&timer, SIGNAL(timeout(bool)), this, SLOT(arrive()));
-	timer.start(dsth->arrival - sim->cur.usecs);
+	timer.start(dsth->arrival - curusecs);
 }
 
 void SimPacket::arrive()
@@ -148,13 +154,17 @@ void SimPacket::arrive()
 	if (tracepkts)
 	if (isclient(src.addr))
 		qDebug("%12lld:\t\t\t\t\t\t        --> %6d %4d",
-			sim->cur.usecs, seqno, buf.size());
+			sim->currentTime().usecs, seqno, buf.size());
 	else
 		qDebug("%12lld: %6d %4d <--",
-			sim->cur.usecs, seqno, buf.size());
+			sim->currentTime().usecs, seqno, buf.size());
 
 	SimSocket *dsts = dsth->socks.value(dst.port);
-	Q_ASSERT(dsts);
+	if (!dsts) {
+		qDebug() << this << "target has no listener on port"
+			<< dst.port;
+		return deleteLater();
+	}
 
 	SocketEndpoint sep(src, dsts);
 	dsts->receive(buf, sep);
@@ -266,12 +276,14 @@ SimHost::~SimHost()
 
 Time SimHost::currentTime()
 {
-	return sim->cur;
+	return sim->realtime ? Host::currentTime() : sim->cur;
 }
 
 TimerEngine *SimHost::newTimerEngine(Timer *timer)
 {
-	return new SimTimerEngine(sim, timer);
+	return sim->realtime
+		? Host::newTimerEngine(timer)
+		: new SimTimerEngine(sim, timer);
 }
 
 Socket *SimHost::newSocket(QObject *parent)
@@ -293,7 +305,11 @@ void SimHost::setHostAddress(const QHostAddress &newaddr)
 
 ////////// Simulator //////////
 
-Simulator::Simulator()
+Simulator::Simulator(bool realtime)
+:	realtime(realtime),
+	netrate(1500000/8),
+	netdelay(55000/2),
+	netbufmul(10)
 {
 	cur.usecs = 0;
 }
@@ -306,9 +322,21 @@ Simulator::~Simulator()
 	// but they should all get garbage collected at this point.
 }
 
+Time Simulator::currentTime()
+{
+	if (realtime)
+		return Time::fromQDateTime(QDateTime::currentDateTime());
+	else
+		return cur;
+}
+
 void Simulator::run()
 {
 	//qDebug() << "Simulator::run()";
+	if (realtime)
+		qFatal("Simulator::run() is only for use with virtual time:\n"
+			"for real time, use QCoreApplication::exec() instead.");
+
 	while (!timers.isEmpty()) {
 		SimTimerEngine *next = timers.dequeue();
 		Q_ASSERT(next->wake >= cur.usecs);

@@ -54,20 +54,21 @@ int server(const QApplication &app, int port)
 	return app.exec();
 }
 
-int sim()
+int sim(const QApplication &app)
 {
 	QHostAddress cliaddr("1.2.3.4");
 	QHostAddress srvaddr("4.3.2.1");
 
-	Simulator sim;
+	Simulator sim(true);
 	SimHost clihost(&sim, cliaddr);
 	SimHost srvhost(&sim, srvaddr);
 
-	WebClient cli(&clihost, srvaddr, defaultPort);
 	WebServer srv(&srvhost, defaultPort);
 
-	sim.run();
-	return 0;
+	WebClient cli(&clihost, srvaddr, defaultPort, &sim);
+	cli.show();
+
+	return app.exec();
 }
 
 int main(int argc, char **argv)
@@ -80,7 +81,7 @@ int main(int argc, char **argv)
 	if (strcasecmp(argv[1], "sim") == 0) {
 		if (argc > 2)
 			usage(argv[0]);
-		return sim();
+		return sim(app);
 	}
 
 	// Second argument, if it exists, is port number

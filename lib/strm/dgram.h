@@ -46,7 +46,7 @@ public:
 	virtual AbstractStream *openSubstream();
 	virtual AbstractStream *acceptSubstream();
 
-	virtual int writeDatagram(const char *data, int size);
+	virtual int writeDatagram(const char *data, int size, bool reli);
 	virtual int readDatagram(char *data, int maxSize);
 	virtual QByteArray readDatagram(int maxSize);
 

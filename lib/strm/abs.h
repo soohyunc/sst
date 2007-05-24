@@ -202,7 +202,7 @@ public:
 	virtual AbstractStream *acceptSubstream() = 0;
 
 	// Send and receive unordered, unreliable datagrams on this stream.
-	virtual int writeDatagram(const char *data, int size) = 0;
+	virtual int writeDatagram(const char *data, int size, bool reli) = 0;
 	virtual int readDatagram(char *data, int maxSize) = 0;
 	virtual QByteArray readDatagram(int maxSize) = 0;
 

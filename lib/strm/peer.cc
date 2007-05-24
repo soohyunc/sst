@@ -18,7 +18,7 @@ using namespace SST;
 ////////// StreamPeer //////////
 
 StreamPeer::StreamPeer(Host *h, const QByteArray &id)
-:	h(h), id(id), flow(NULL), recontimer(h)
+:	h(h), id(id), flow(NULL), recontimer(h), stallcount(0)
 {
 	Q_ASSERT(!id.isEmpty());
 
@@ -263,6 +263,7 @@ void StreamPeer::flowStarted(StreamFlow *fl)
 
 	// Use this flow as our primary flow for this target.
 	flow = fl;
+	stallcount = 0;
 
 	// Re-parent it directly underneath us,
 	// so it won't be deleted when its KeyInitiator disappears.
@@ -309,6 +310,7 @@ void StreamPeer::primaryStatusChanged(LinkStatus newstatus)
 		// (If we were to kill a non-early KeyInitiator,
 		// the receiver might pick one of those streams
 		// as _its_ primary and be left with a dangling flow!)
+		stallcount = 0;
 		foreach (KeyInitiator *ki, initors.values()) {
 			if (!ki->isEarly())
 				continue;	// too late - let it finish
@@ -320,6 +322,14 @@ void StreamPeer::primaryStatusChanged(LinkStatus newstatus)
 			ki->deleteLater();
 		}
 		return;
+	}
+
+	if (newstatus == LinkStalled) {
+		if (++stallcount < stallMax) {
+			qDebug() << this << "primary stall" << stallcount
+				<< "of" << stallMax;
+			return;
+		}
 	}
 
 	// Primary is at least stalled, perhaps permanently failed -

@@ -50,7 +50,7 @@ void DatagramTest::gotLinkUp()
 	QByteArray buf;
 	for (int i = 0; i < NDGRAMS; i++) {
 		buf.resize(1 << p2);
-		cli.writeDatagram(buf);
+		cli.writeDatagram(buf, false);
 		if (++p2 > 15)	// XXX Max dgram size: 2^20 = 1MB
 			p2 = 4;
 	}

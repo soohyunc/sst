@@ -115,6 +115,9 @@ class Simulator : public QObject
 	Q_OBJECT
 
 private:
+	// True if we're using realtime instead of virtualized time
+	const bool realtime;
+
 	// The current virtual system time
 	Time cur;
 
@@ -124,9 +127,24 @@ private:
 	// Table of all hosts in the simulation
 	QHash<QHostAddress, SimHost*> hosts;
 
+	// Network performance settings
+	int netrate;		// Link bandwidth in bytes per second
+	int netdelay;		// Link delay in microseconds one-way
+	int netbufmul;		// Delay multiplier representing net buffering
+
 public:
-	Simulator();
+	Simulator(bool realtime = false);
 	virtual ~Simulator();
+
+	Time currentTime();
+
+	inline int netRate() const { return netrate; }
+	inline int netDelay() const { return netdelay; }
+	inline int netBufferMultiplier() const { return netbufmul; }
+
+	void setNetRate(int rate) { netrate = rate; }
+	void setNetDelay(int delay) { netdelay = delay; }
+	void setNetBufferMultiplier(int bufmul) { netbufmul = bufmul; }
 
 	void run();
 };

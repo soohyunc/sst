@@ -37,7 +37,7 @@ void WebServer::gotConnection()
 	strm->setParent(this);
 	connect(strm, SIGNAL(readyReadMessage()),
 		this, SLOT(connRead()));
-	connect(strm, SIGNAL(newSubstream()),
+	connect(strm, SIGNAL(readyReadDatagram()),
 		this, SLOT(connSub()));
 	connect(strm, SIGNAL(reset(const QString &)),
 		this, SLOT(connReset()));
@@ -79,25 +79,15 @@ void WebServer::connSub()
 	Stream *strm = (Stream*)sender();
 
 	while (true) {
-		Stream *sub = strm->acceptSubstream();
-		if (!sub)
-			return;
-
 		qDebug() << "Got priority change request";
 		qint32 buf;
-		int act = sub->read((char*)&buf, 4);
-		if (act != 4) {
-			qWarning("bad priority change req len %d", act);
-			delete sub;
-			continue;
-		}
+		int act = strm->readDatagram((char*)&buf, sizeof(buf));
+		if (act <= 0)
+			return;
+		Q_ASSERT(act == sizeof(buf));
 
 		int newpri = ntohl(buf);
 		strm->setPriority(newpri);
-
-		// We're done with the substream now;
-		// SST will close it gracefully.
-		delete sub;
 	}
 }
 

@@ -80,7 +80,7 @@ AbstractStream *DatagramStream::acceptSubstream()
 	return NULL;
 }
 
-int DatagramStream::writeDatagram(const char *, int)
+int DatagramStream::writeDatagram(const char *, int, bool)
 {
 	setError("Ephemeral datagram-streams cannot have sub-datagrams");
 	return -1;

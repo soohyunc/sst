@@ -36,11 +36,16 @@ class StreamPeer : public QObject, public StreamProtocol
 	// Retry connection attempts for persistent streams once every minute.
 	static const int connectRetry = 1*60; 
 
+	// Number of stall warnings we get from our primary stream
+	// before we start a new lookup/KeyInitiator phase to try replacing it.
+	static const int stallMax = 3;
+
 	Host *const h;			// Our per-host state
 	const QByteArray id;		// Host ID of target
 	StreamFlow *flow;		// Current primary flow
 	QSet<RegClient*> lookups;	// Outstanding lookups in progress
 	Timer recontimer;		// For persistent lookup requests
+	int stallcount;			// Stall warnings before new lookup
 
 	// Set of RegClients we've connected to so far
 	QPointerSet<RegClient> connrcs;
