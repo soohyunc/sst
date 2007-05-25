@@ -252,7 +252,7 @@ void Stream::connectNotify(const char *signal)
 void Stream::connectLinkStatusChanged()
 {
 	if (statconn || !as ||
-			receivers(SIGNAL(linkStatusChanged(LinkStatus)) <= 0))
+			receivers(SIGNAL(linkStatusChanged(LinkStatus))) <= 0)
 		return;
 
 	StreamPeer *peer = host->streamPeer(as->peerid);

@@ -1,4 +1,4 @@
 
 TEMPLATE = subdirs
-SUBDIRS = lib regress ucbweb
+SUBDIRS = lib regress web ucbweb
 
