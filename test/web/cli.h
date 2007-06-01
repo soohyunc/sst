@@ -7,14 +7,14 @@
 #include <QString>
 #include <QMainWindow>
 #include <QTextCursor>
+#include <QTextEdit>
 
 #include "host.h"
 #include "sim.h"
 
 class QFile;
 class QLabel;
-class QCheckBox;
-class QTextEdit;
+class QComboBox;
 
 
 namespace SST {
@@ -41,6 +41,22 @@ struct WebImage
 		: strm(NULL), pri(0), tmpf(NULL) { }
 };
 
+class WebView : public QTextEdit
+{
+	Q_OBJECT
+
+public:
+	inline WebView(QWidget *parent) : QTextEdit(parent) { }
+
+	inline void trackMouse(bool track) { setMouseTracking(track); }
+
+signals:
+	void mouseMoved(int x, int y);
+
+private:
+	void mouseMoveEvent(QMouseEvent *event);
+};
+
 class WebClient : public QMainWindow
 {
 	Q_OBJECT
@@ -51,14 +67,16 @@ private:
 	int srvport;
 	Simulator *sim;
 
-	QCheckBox *priocheck;
+	QComboBox *priobox;
 	QLabel *speedlabel;
-	QTextEdit *textedit;
+	WebView *webview;
 
 	QList<WebImage> images;
 	QHash<Stream*,int> strms;
 
 	Timer refresher;
+
+	int mousex, mousey;	// for prioritizing image under pointer
 
 public:
 	WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
@@ -69,12 +87,14 @@ private:
 	void setPri(int img, int pri);
 
 private slots:
+	void prioboxChanged(int);
 	void reload();
 	void setPriorities();
 	void readyRead();
 	void refreshSoon();
 	void refreshNow();
 	void speedSliderChanged(int value);
+	void mouseMoved(int x, int y);
 };
 
 

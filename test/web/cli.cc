@@ -6,11 +6,11 @@
 #include <QIcon>
 #include <QLabel>
 #include <QSlider>
-#include <QCheckBox>
+#include <QComboBox>
 #include <QScrollBar>
 #include <QToolBar>
-#include <QTextEdit>
 #include <QTextDocument>
+#include <QMouseEvent>
 #include <QUrl>
 
 #include "cli.h"
@@ -21,6 +21,20 @@ using namespace SST;
 // Number of parallel downloads for legacy mode - 2 is RFC-compliant behavior.
 static const int legacyConns = 2;
 
+
+////////// WebView //////////
+
+void WebView::mouseMoveEvent(QMouseEvent *ev)
+{
+	//qDebug() << "mouse move:" << ev->x() << ev->y();
+
+	QTextEdit::mouseMoveEvent(ev);
+	mouseMoved(ev->x(), ev->y());
+}
+
+
+
+////////// WebClient //////////
 
 WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
 			Simulator *sim)
@@ -35,17 +49,20 @@ WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
 	toolbar->addAction(QIcon("images/reload.png"), tr("Reload"),
 						this, SLOT(reload()));
 
-	priocheck = new QCheckBox(tr("Prioritize Loads"), this);
-	toolbar->addWidget(priocheck);
-	connect(priocheck, SIGNAL(stateChanged(int)),
-		this, SLOT(refreshSoon()));
+	priobox = new QComboBox(this);
+	priobox->addItem(tr("Traditional Web Browser Behavior"));
+	priobox->addItem(tr("Prioritize Visible Images"));
+	priobox->addItem(tr("Prioritize Image Under Pointer"));
+	toolbar->addWidget(priobox);
+	connect(priobox, SIGNAL(currentIndexChanged(int)),
+		this, SLOT(prioboxChanged(int)));
 
 	// We only get a speed-throttle control on the simulated network.
 	if (sim) {
 		QSlider *speedslider = new QSlider(this);
 		speedslider->setMinimum(10);	// 2^10 = 1024 bytes per sec
 		speedslider->setMaximum(30);	// 2^30 = 1 GByte per sec
-		speedslider->setValue(14);	// 2^14 = 16KB/sec
+		speedslider->setValue(13);	// 2^13 = 8KB/sec
 		speedslider->setOrientation(Qt::Horizontal);
 		toolbar->addWidget(speedslider);
 
@@ -62,10 +79,12 @@ WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
 		qFatal("can't open web page");
 	QString html = QString::fromAscii(pagefile.readAll());
 
-	textedit = new QTextEdit(this);
-	textedit->setReadOnly(true);
+	webview = new WebView(this);
+	webview->setReadOnly(true);
+	connect(webview, SIGNAL(mouseMoved(int,int)),
+		this, SLOT(mouseMoved(int,int)));
 
-	QTextDocument *doc = textedit->document();
+	QTextDocument *doc = webview->document();
 	doc->setHtml(html);
 
 	// Find all the images in the web page, and set their true sizes.
@@ -120,20 +139,20 @@ WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
 		QTextCursor curs(doc);
 
 		curs.setPosition(wi.curs.selectionStart());
-		QRect rbef = textedit->cursorRect(curs);
+		QRect rbef = webview->cursorRect(curs);
 		curs.setPosition(wi.curs.selectionEnd());
-		QRect raft = textedit->cursorRect(curs);
+		QRect raft = webview->cursorRect(curs);
 		wi.rect = rbef.united(raft);
 		qDebug() << "image" << i << "rect" << wi.rect;
 	}
 #endif
 
-	textedit->moveCursor(QTextCursor::Start);
+	webview->moveCursor(QTextCursor::Start);
 
-	setCentralWidget(textedit);
+	setCentralWidget(webview);
 
 	// Watch the text edit box's vertical scroll bar for changes.
-	connect(textedit->verticalScrollBar(), SIGNAL(valueChanged(int)),
+	connect(webview->verticalScrollBar(), SIGNAL(valueChanged(int)),
 		this, SLOT(refreshSoon()));
 
 	connect(&refresher, SIGNAL(timeout(bool)), this, SLOT(refreshNow()));
@@ -176,7 +195,7 @@ void WebClient::reload()
 
 		// Send the image request immediately for prioritization,
 		// or only for the first two images for legacy behavior.
-		if (priocheck->isChecked() || i < legacyConns)
+		if (priobox->currentIndex() > 0 || i < legacyConns)
 			sendRequest(i);
 
 		wi.done = false;
@@ -206,12 +225,13 @@ void WebClient::setPriorities()
 {
 	//qDebug() << "setPriorities";
 
-	if (!priocheck->isChecked())
+	if (priobox->currentIndex() <= 0)
 		return;		// No prioritization!
+	bool ptrpri = (priobox->currentIndex() == 2);
 
-	int start = textedit->cursorForPosition(QPoint(0,0)).position();
-	int end = textedit->cursorForPosition(
-				QPoint(textedit->width(),textedit->height()))
+	int start = webview->cursorForPosition(QPoint(0,0)).position();
+	int end = webview->cursorForPosition(
+				QPoint(webview->width(),webview->height()))
 			.position();
 	qDebug() << "window:" << start << "to" << end;
 
@@ -221,9 +241,27 @@ void WebClient::setPriorities()
 		// Determine if this image is currently visible
 		bool vis = wi.curs.selectionStart() <= end &&
 				wi.curs.selectionEnd() >= start;
+		int pri = vis ? 1 : 0;
+
+		// If it's visible, see if it's under the mouse pointer
+		// and prioritize it further if appropriate.
+		if (vis && ptrpri) {
+			QTextCursor curs(webview->document());
+			curs.setPosition(wi.curs.selectionStart());
+			QRect rbef = webview->cursorRect(curs);
+			curs.setPosition(wi.curs.selectionEnd());
+			QRect raft = webview->cursorRect(curs);
+			QRect rect = rbef.united(raft);
+			if (rect.contains(mousex, mousey))
+				pri = 2;
+
+			//qDebug() << "ptr" << mousex << mousey
+			//	<< (pri == 2 ? "in" : "not in")
+			//	<< rect << "img" << i;
+		}
 
 		// Set the image's priority accordingly
-		setPri(i, vis ? 1 : 0);
+		setPri(i, pri);
 	}
 }
 
@@ -233,11 +271,21 @@ void WebClient::setPri(int i, int pri)
 	if (wi.strm == NULL || wi.pri == pri)
 		return;		// no change
 
+	qDebug() << "change img" << i << "to priority" << pri;
+
 	// Send a priority change message
 	quint32 msg = htonl(pri);
 	wi.strm->writeDatagram((char*)&msg, sizeof(msg), true);
 
 	wi.pri = pri;
+}
+
+void WebClient::prioboxChanged(int sel)
+{
+	webview->trackMouse(sel == 2);
+	qDebug() << "mouse tracking" << (sel == 2);
+
+	refreshSoon();
 }
 
 void WebClient::readyRead()
@@ -305,7 +353,7 @@ void WebClient::refreshNow()
 
 		// Load the image from disk
 		QImage img("tmp/" + wi.name);
-		textedit->document()->addResource(QTextDocument::ImageResource,
+		webview->document()->addResource(QTextDocument::ImageResource,
 						QUrl(wi.name), img);
 		QTextImageFormat ifmt = wi.curs.charFormat().toImageFormat();
 		ifmt.setName(wi.name);
@@ -313,7 +361,8 @@ void WebClient::refreshNow()
 	}
 
 	// Legacy: fire off new requests after images complete
-	int maxreqs = priocheck->isChecked() ? 9999 : legacyConns;
+	// Prio: fire all requests for ALL images not started loading yet
+	int maxreqs = priobox->currentIndex() > 0 ? 9999 : legacyConns;
 	int ncur = 0;
 	for (int i = 0; i < images.size(); i++) {
 		WebImage &wi = images[i];
@@ -346,5 +395,12 @@ void WebClient::speedSliderChanged(int value)
 	else
 		str = tr("%0 Bytes/sec").arg(1 << value);
 	speedlabel->setText(str);
+}
+
+void WebClient::mouseMoved(int x, int y)
+{
+	mousex = x;
+	mousey = y;
+	refreshSoon();
 }
 
