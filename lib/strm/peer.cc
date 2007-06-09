@@ -100,13 +100,18 @@ void StreamPeer::conncli(RegClient *rc)
 void StreamPeer::lookupDone(const QByteArray &id, const Endpoint &loc,
 				const RegInfo &info)
 {
-	Q_ASSERT(this->id == id);
+	if (id != this->id) {
+		//qDebug() << this << "got lookupDone for wrong id"
+		//	<< id.toBase64()
+		//	<< "expecting" << this->id.toBase64();
+		return;	// ignore responses for other lookup requests
+	}
 
 	// Mark this outstanding lookup as completed.
 	RegClient *rc = (RegClient*)sender();
 	if (!lookups.contains(rc)) {
 		//qDebug() << "StreamPeer: unexpected lookupDone signal";
-		return;
+		return;	// ignore duplicates caused by concurrent requests
 	}
 	lookups.remove(rc);
 
