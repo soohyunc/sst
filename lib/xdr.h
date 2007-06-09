@@ -325,6 +325,7 @@ void xdrEncodeArray(XdrStream &xs, const QList<T> &l, quint32 maxlen)
 {
 	quint32 len = l.size();
 	Q_ASSERT(len <= maxlen);
+	(void)maxlen;	// shut up g++ about unused maxlen
 	xs << len;
 	for (quint32 i = 0; i < len; i++) {
 		if (xs.status() != xs.Ok)
@@ -367,6 +368,7 @@ inline void xdrDecodeVector(XdrStream &xs, QByteArray &v, int len)
 inline void xdrEncodeArray(XdrStream &xs, const QByteArray &v, quint32 maxlen)
 {
 	Q_ASSERT((quint32)v.size() <= maxlen);
+	(void)maxlen;	// shut up g++ about unused maxlen
 	xs << v;
 }
 

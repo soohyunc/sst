@@ -1,4 +1,9 @@
 
+// XXX work around apparent bug in g++ 4.1.2
+#include <QtGlobal>
+namespace SST { struct UniqueStreamId; };
+uint qHash(const SST::UniqueStreamId &usid);
+
 #include <QtDebug>
 
 #include "xdr.h"

@@ -7,6 +7,12 @@ INCLUDEPATH += @INCS@
 LIBS += @LIBS@
 
 
+# SST currently has some code that violates the new strict aliasing rules,
+# which I really don't feel like fixing.  (Type punning is very handy!)
+QMAKE_CFLAGS += -fno-strict-aliasing
+QMAKE_CXXFLAGS += -fno-strict-aliasing
+
+
 # Uncomment the following to build with profiling
 #QMAKE_CFLAGS+=-pg
 #QMAKE_CXXFLAGS+=-pg

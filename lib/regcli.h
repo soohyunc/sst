@@ -22,7 +22,7 @@ class RegClient : public QObject
 
 private:
 	// Max time before rereg - 1 hr
-	static const qint64 maxRereg = 60*60*1000000;
+	static const qint64 maxRereg = (qint64)60*60*1000000;
 
 
 	Host *const h;		// Pointer to our per-host state
