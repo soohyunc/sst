@@ -25,7 +25,7 @@ IdentData::IdentData(const IdentData &other)
 	k(NULL)
 {
 	if (other.k) {
-		qDebug("IdentData: copying key");
+		//qDebug("IdentData: copying key");
 
 		// Copy the key by serializing and deserializing it.
 		bool isPrivate = other.k->type() == SignKey::Private;
@@ -242,6 +242,19 @@ quint16 Ident::ipPort()
 	quint16 port;
 	ipAddress(&port);
 	return port;
+}
+
+Ident Ident::fromEndpoint(const Endpoint &ep)
+{
+	return fromIpAddress(ep.addr, ep.port);
+}
+
+Endpoint Ident::endpoint()
+{
+	Endpoint ep;
+	ep.addr = ipAddress();
+	ep.port = ipPort();
+	return ep;
 }
 
 

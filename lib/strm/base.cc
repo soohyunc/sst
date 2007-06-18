@@ -155,7 +155,7 @@ void BaseStream::clear()
 }
 
 void BaseStream::connectTo(const QString &service, const QString &protocol,
-			const Endpoint &dstep)
+			const QList<Endpoint> &dsteps)
 {
 	Q_ASSERT(!service.isEmpty());
 	Q_ASSERT(state == Fresh);
@@ -165,8 +165,8 @@ void BaseStream::connectTo(const QString &service, const QString &protocol,
 	toplev = true;
 
 	// If we were given a location hint, record it for setting up flows.
-	if (!dstep.isNull())
-		peer->foundEndpoint(dstep);
+	foreach (const Endpoint &ep, dsteps)
+		peer->foundEndpoint(ep);
 
 	// Queue up a service connect message onto the new stream.
 	// This will only go out once we actually attach to a flow,
@@ -661,7 +661,7 @@ void BaseStream::acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq)
 	}
 }
 
-void BaseStream::missed(StreamFlow *flow, const Packet &pkt)
+void BaseStream::missed(StreamFlow *, const Packet &pkt)
 {
 	//qDebug() << this << "missed bsn" << pkt.tsn
 	//	<< "size" << pkt.buf.size();
@@ -1103,6 +1103,7 @@ bool BaseStream::rxAckPacket(quint64 pktseq, QByteArray &pkt,
 				StreamFlow *flow)
 {
 	// XXX use flow control info
+	(void)pkt;
 
 	// Count this explicit ack packet as received,
 	// but do NOT send another ack just to ack this ack!
@@ -1114,6 +1115,7 @@ bool BaseStream::rxResetPacket(quint64 pktseq, QByteArray &pkt,
 				StreamFlow *flow)
 {
 	Q_ASSERT(0);	// XXX
+	(void)pktseq; (void)pkt; (void)flow;
 	return false;
 }
 
@@ -1189,6 +1191,7 @@ bool BaseStream::rxAttachPacket(quint64 pktseq, QByteArray &pkt,
 bool BaseStream::rxDetachPacket(quint64 pktseq, QByteArray &pkt,
 				StreamFlow *flow)
 {
+	(void)pktseq; (void)pkt; (void)flow;
 	Q_ASSERT(0);	// XXX
 	return false;
 }

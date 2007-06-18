@@ -132,6 +132,10 @@ public:
 	 *		The destination may be either a cryptographic EID
 	 * 		or a non-cryptographic legacy address
 	 *		as defined by the Ident class.
+	 *		The dstid may also be empty,
+	 *		indicating that the destination's identity is unknown;
+	 *		in this case the caller must provide a location hint
+	 *		via the dstep argument.
 	 * @param service the service name to connect to on the remote host.
 	 * @param protocol the application protocol name to connect to.
 	 * @param dstep	an optional location hint
@@ -149,13 +153,25 @@ public:
 	 */
 	bool connectTo(const QByteArray &dstid,
 			const QString &service, const QString &protocol,
-			const Endpoint &dstep = Endpoint());
+			const QList<Endpoint> &dsteps = QList<Endpoint>());
 
 	/** Connect to a given service and protocol on a remote host.
 	 * @overload */
 	bool connectTo(const Ident &dstid,
 			const QString &service, const QString &protocol,
-			const Endpoint &dstep = Endpoint());
+			const QList<Endpoint> &dsteps = QList<Endpoint>());
+
+	/** Connect to a given service and protocol on a remote host.
+	 * @overload */
+	bool connectTo(const QByteArray &dstid,
+			const QString &service, const QString &protocol,
+			const Endpoint &dstep);
+
+	/** Connect to a given service and protocol on a remote host.
+	 * @overload */
+	bool connectTo(const Ident &dstid,
+			const QString &service, const QString &protocol,
+			const Endpoint &dstep);
 
 	/** Disconnect the stream from its current peer.
 	 * This method immediately returns the stream to the unconnected state:
@@ -216,6 +232,10 @@ public:
 	 *		but no bytes are immediately available for reading.
 	 */
 	virtual qint64 readData(char *data, qint64 maxSize);
+
+	/** Read up to maxSize bytes of data into a QByteArray.
+	 * @overload */
+	QByteArray readData(int maxSize = 1 << 30);
 
 
 	/// Returns the number of complete messages
@@ -427,6 +447,14 @@ public:
 	/// but any further data received from the other side is dropped.
 	inline void close() { shutdown(Close); }
 
+	/** Give the stream layer a location hint for a specific EID,
+	 * which may or may not be the EID of the host
+	 * to which this stream is currently connected (if any).
+	 * The stream layer will use this hint in any current or subsequent
+	 * attempts to connect to the specified EID.
+	 */
+	bool locationHint(const QByteArray &eid, const Endpoint &hint);
+
 
 #ifndef QT_NO_DEBUG
 	/// Dump the state of this stream, for debugging purposes.
@@ -479,6 +507,11 @@ signals:
 	 * and grow the receive window to accommodate large datagrams.
 	 */
 	void readyReadDatagram();
+
+	/** Emitted when some locally buffered data gets flushed
+	 * after being delivered to the receiver and acknowledged.
+	 * XXX not implemented yet. */
+	void bytesWritten(qint64 bytes);
 
 	/** Emitted when the stream establishes live connectivity
 	 * upon first connecting, or after being down or stalled. */

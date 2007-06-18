@@ -10,6 +10,26 @@ AC_LANG([C++])
 INCS=""
 AC_SUBST(INCS)
 
+# Similarly, build an absolute install pathname for Qt to use,
+# because qmake uses different variable substitution operators...  (grrr)
+PREFIX=$prefix
+test "x$PREFIX" = xNONE && PREFIX=$ac_default_prefix
+EXEC_PREFIX=$exec_prefix
+test "x$EXEC_PREFIX" = xNONE && EXEC_PREFIX=$PREFIX
+BINDIR=$bindir
+test "x$BINDIR" = 'x${exec_prefix}/bin' && BINDIR=$EXEC_PREFIX/bin
+AC_SUBST(BINDIR)
+LIBDIR=$libdir
+test "x$LIBDIR" = 'x${exec_prefix}/lib' && LIBDIR=$EXEC_PREFIX/lib
+AC_SUBST(LIBDIR)
+INCDIR=$includedir
+test "x$INCDIR" = 'x${prefix}/include' && INCDIR=$PREFIX/include
+AC_SUBST(INCDIR)
+ETCDIR=$sysconfdir
+test "x$ETCDIR" = 'x${prefix}/etc' && ETCDIR=$PREFIX/etc
+AC_SUBST(ETCDIR)
+
+
 # Check for required Qt 4 framework
 AC_ARG_WITH(qt, AC_HELP_STRING([--with-qt=DIR],
 		[Qt 4 toolkit location]))

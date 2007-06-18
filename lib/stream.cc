@@ -46,14 +46,29 @@ Stream::~Stream()
 
 bool Stream::connectTo(const QByteArray &dstid,
 			const QString &service, const QString &protocol,
-			const Endpoint &dstep)
+			const QList<Endpoint> &dsteps)
 {
+	// Determine a suitable target EID.
+	// If the caller didn't specify one (doesn't know the target's EID),
+	// then use the first location hint as a surrogate peer identity.
+	QByteArray eid = dstid;
+	if (eid.isEmpty()) {
+		if (dsteps.isEmpty()) {
+			setError(tr("Stream::connectTo: empty target EID "
+					"and no location hints"));
+			return false;
+		}
+		eid = Ident::fromEndpoint(dsteps[0]).id();
+		Q_ASSERT(!eid.isEmpty());
+	}
+
+	// Disconnect from any previous BaseStream
 	disconnect();
 	Q_ASSERT(!as);
 
 	// Create a top-level application stream object for this connection.
 	typedef BaseStream ConnectStream;	// XXX
-	ConnectStream *cs = new ConnectStream(host, dstid, NULL);
+	ConnectStream *cs = new ConnectStream(host, eid, NULL);
 	cs->strm = this;
 	as = cs;
 
@@ -61,7 +76,7 @@ bool Stream::connectTo(const QByteArray &dstid,
 	connectLinkStatusChanged();
 
 	// Start the actual network connection process
-	cs->connectTo(service, protocol, dstep);
+	cs->connectTo(service, protocol, dsteps);
 
 	// We allow the client to start "sending" data immediately
 	// even before the stream has fully connected.
@@ -72,9 +87,27 @@ bool Stream::connectTo(const QByteArray &dstid,
 
 bool Stream::connectTo(const Ident &dstid,
 		const QString &service, const QString &protocol,
+		const QList<Endpoint> &dsteps)
+{
+	return connectTo(dstid.id(), service, protocol, dsteps);
+}
+
+bool Stream::connectTo(const QByteArray &dstid,
+		const QString &service, const QString &protocol,
 		const Endpoint &dstep)
 {
-	return connectTo(dstid.id(), service, protocol, dstep);
+	QList<Endpoint> dsteps;
+	dsteps.append(dstep);
+	return connectTo(dstid, service, protocol, dsteps);
+}
+
+bool Stream::connectTo(const Ident &dstid,
+		const QString &service, const QString &protocol,
+		const Endpoint &dstep)
+{
+	QList<Endpoint> dsteps;
+	dsteps.append(dstep);
+	return connectTo(dstid, service, protocol, dsteps);
 }
 
 void Stream::disconnect()
@@ -152,6 +185,18 @@ qint64 Stream::readData(char *data, qint64 maxSize)
 {
 	if (!as) return setError(tr("Stream not connected")), -1;
 	return as->readData(data, maxSize);
+}
+
+QByteArray Stream::readData(int maxSize)
+{
+	QByteArray buf;
+	buf.resize(qMin((qint64)maxSize, bytesAvailable()));
+	qint64 act = readData(buf.data(), buf.size());
+	if (act < 0)
+		return QByteArray();
+	if (act < buf.size())
+		buf.resize(act);
+	return buf;
 }
 
 int Stream::pendingMessages() const
@@ -273,6 +318,18 @@ void Stream::shutdown(ShutdownMode mode)
 	if (mode & Write)
 		setOpenMode(isReadable() ? ReadOnly : NotOpen);
 }
+
+bool Stream::locationHint(const QByteArray &eid, const Endpoint &hint)
+{
+	if(eid.isEmpty()) {
+		setError(tr("No target EID for location hint"));
+		return false;
+	}
+
+	host->streamPeer(eid)->foundEndpoint(hint);
+	return true;
+}
+
 
 void Stream::setError(const QString &errorString)
 {

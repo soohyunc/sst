@@ -278,7 +278,7 @@ public:
 	 * @see Ident
 	 */
 	void connectTo(const QString &service, const QString &protocol,
-			const Endpoint &dstep = Endpoint());
+			const QList<Endpoint> &dsteps);
 
 	/// Returns true if the underlying link is currently connected
 	/// and usable for data transfer.

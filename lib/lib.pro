@@ -56,3 +56,9 @@ unix {
 	SOURCES += os-unix.cc
 }
 
+
+# Installation
+libsst.path = $$LIBDIR
+libsst.commands = install -c ../libsst.a $$INSTALL_ROOT$$LIBDIR/
+INSTALLS += libsst
+

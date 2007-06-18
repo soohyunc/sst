@@ -17,6 +17,7 @@ namespace SST {
 
 class SecureHash;
 class Ident;
+class Endpoint;
 
 
 class IdentData : public QSharedData
@@ -205,6 +206,15 @@ public:
 	/** Extract the port number part of an identifier in the IP scheme.
 	 * @return the 16-bit port number, 0 if the EID contains no port. */
 	quint16 ipPort();
+
+	/** Create an Ident representing a non-cryptographic endpoint
+	 * (IP address and port number pair).
+	 */
+	static Ident fromEndpoint(const Endpoint &ep);
+
+	/** Extract the endpoint (IP address and port pair)
+	 * from an EID that describes an endpoint. */
+	Endpoint endpoint();
 };
 
 
