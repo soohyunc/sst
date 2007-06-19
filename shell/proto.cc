@@ -350,7 +350,7 @@ ShellStream::Packet ShellStream::receive()
 					return Packet(Data,
 						QByteArray(1, ControlMarker));
 				}
-				qDebug() << "control msg size" << clen;
+				//qDebug() << "control msg size" << clen;
 				rstate = RecvMessage;
 				cbuf.resize(clen);
 				cgot = 0;
@@ -374,5 +374,10 @@ ShellStream::Packet ShellStream::receive()
 			break; }
 		}
 	}
+}
+
+bool ShellStream::atEnd() const
+{
+	return strm->atEnd();
 }
 

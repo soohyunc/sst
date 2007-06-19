@@ -11,6 +11,29 @@
 using namespace SST;
 
 
+////////// PidWatcher //////////
+
+PidWatcher::PidWatcher(QObject *parent)
+:	QThread(parent),
+	pid(-1)
+{
+}
+
+void PidWatcher::watchPid(int pid)
+{
+	Q_ASSERT(!isRunning() && !isFinished());
+
+	this->pid = pid;
+	start();
+}
+
+void PidWatcher::run()
+{
+	Q_ASSERT(pid > 0);
+	waitpid(pid, &stat, 0);
+}
+
+
 ////////// ShellSession //////////
 
 ShellSession::ShellSession(Stream *strm, QObject *parent)
@@ -18,15 +41,22 @@ ShellSession::ShellSession(Stream *strm, QObject *parent)
 	shs(strm),
 	ptyfd(-1), ttyfd(-1)
 {
+	// Make sure the SST stream terminates when we do
+	strm->setParent(this);
+
 	connect(&shs, SIGNAL(readyRead()), this, SLOT(inReady()));
 	connect(&aftty, SIGNAL(bytesWritten(qint64)), this, SLOT(inReady()));
 
 	connect(&aftty, SIGNAL(readyRead()), this, SLOT(outReady()));
 	connect(&shs, SIGNAL(bytesWritten(qint64)), this, SLOT(outReady()));
+
+	connect(&pidw, SIGNAL(finished()), this, SLOT(childDone()));
 }
 
 ShellSession::~ShellSession()
 {
+	qDebug() << this << "~ShellSession";
+
 	aftty.close();
 
 	if (ptyfd >= 0)
@@ -45,10 +75,14 @@ void ShellSession::inReady()
 		ShellStream::Packet pkt = shs.receive();
 		switch (pkt.type) {
 		case ShellStream::Null:
+			if (shs.atEnd()) {
+				qDebug() << "End of remote input";
+				shutdown(aftty.fileDescriptor(), SHUT_WR);
+			}
 			return;	// nothing more to receive for now
 
 		case ShellStream::Data:
-			qDebug() << this << "input:" << pkt.data;
+			//qDebug() << this << "input:" << pkt.data;
 			if (!ttyopen) {
 				error(tr("Received shell data before command "
 					"to start shell"));
@@ -80,14 +114,16 @@ void ShellSession::outReady()
 				error(aftty.errorString());
 			return;
 		}
-		qDebug() << this << "output:" << QByteArray(buf, act);
+		//qDebug() << this << "output:" << QByteArray(buf, act);
 		shs.sendData(buf, act);
 
 		// When our child process(es) have no more output to send,
-		// propagate the EOF condition to the client.
+		// just close our end of the pipe and stop forwarding data
+		// until the child process dies and we get its exit status.
+		// (XX notify client via control message?)
 		if (aftty.atEnd()) {
-			qDebug() << this << "EOF: self destructing";
-			this->deleteLater();
+			qDebug() << this << "end-of-file on child pseudo-tty";
+			aftty.close();
 		}
 	}
 }
@@ -124,7 +160,8 @@ void ShellSession::openPty(XdrStream &rxs)
 	if (rxs.status() != rxs.Ok)
 		return error(tr("Invalid Terminal request"));
 
-	qDebug() << "terminal window:" << width << "x" << height;
+	qDebug() << "terminal" << termname
+		<< "window" << width << "x" << height;
 
 	ptyfd = posix_openpt(O_RDWR | O_NOCTTY);
 	if (ptyfd < 0)
@@ -182,14 +219,14 @@ void ShellSession::run(const QString &/*cmd XXX*/)
 	Q_ASSERT((ptyfd >= 0) ^ (ttyfd >= 0));	// one or the other, not both
 
 	// Fork off the child process.
-	pid_t child = fork();
-	if (child < 0) {
+	pid_t childpid = fork();
+	if (childpid < 0) {
 		if (childfd >= 0)
 			close(childfd);
 		return error(tr("Can't create child process: %0")
 				.arg(strerror(errno)));
 	}
-	if (child == 0) {
+	if (childpid == 0) {
 		// We're the child process.
 
 		// XXX authenticate user, setuid appropriately
@@ -217,6 +254,9 @@ void ShellSession::run(const QString &/*cmd XXX*/)
 			childfd = open(ttyname, O_RDWR);
 			if (childfd < 0)
 				{ perror("Remote shell: open tty"); exit(1); }
+
+			// Set the TERM environment variable appropriately
+			setenv("TERM", termname.toLocal8Bit().data(), 1);
 		}
 		Q_ASSERT(childfd >= 0);
 
@@ -241,6 +281,9 @@ void ShellSession::run(const QString &/*cmd XXX*/)
 	// Set up for I/O forwarding.
 	aftty.open(ptyfd >= 0 ? ptyfd : ttyfd, QIODevice::ReadWrite);
 
+	// Watch for the child process's termination.
+	pidw.watchPid(childpid);
+
 	qDebug() << this << "started shell";
 }
 
@@ -250,6 +293,72 @@ void ShellSession::error(const QString &str)
 
 	// XXX send error control message
 
+	this->deleteLater();
+}
+
+void ShellSession::childDone()
+{
+	int st = pidw.exitStatus();
+	qDebug() << "child terminated with status" << st;
+
+	QByteArray cmsg;
+	XdrStream wxs(&cmsg, QIODevice::WriteOnly);
+	if (WIFEXITED(st)) {
+		// Regular process termination
+		wxs << (qint32)ExitStatus << (qint32)WEXITSTATUS(st);
+
+	} else if (WIFSIGNALED(st)) {
+
+		// Process terminated by signal
+		QString signame;
+		switch (WTERMSIG(st)) {
+		case SIGABRT:	signame = "SIGABRT"; break;
+		case SIGALRM:	signame = "SIGALRM"; break;
+		case SIGBUS:	signame = "SIGBUS"; break;
+		case SIGCHLD:	signame = "SIGCHLD"; break;
+		case SIGCONT:	signame = "SIGCONT"; break;
+		case SIGFPE:	signame = "SIGFPE"; break;
+		case SIGHUP:	signame = "SIGHUP"; break;
+		case SIGILL:	signame = "SIGILL"; break;
+		case SIGINT:	signame = "SIGINT"; break;
+		case SIGKILL:	signame = "SIGKILL"; break;
+		case SIGPIPE:	signame = "SIGPIPE"; break;
+		case SIGQUIT:	signame = "SIGQUIT"; break;
+		case SIGSEGV:	signame = "SIGSEGV"; break;
+		case SIGSTOP:	signame = "SIGSTOP"; break;
+		case SIGTERM:	signame = "SIGTERM"; break;
+		case SIGTSTP:	signame = "SIGTSTP"; break;
+		case SIGTTIN:	signame = "SIGTTIN"; break;
+		case SIGTTOU:	signame = "SIGTTOU"; break;
+		case SIGUSR1:	signame = "SIGUSR1"; break;
+		case SIGUSR2:	signame = "SIGUSR2"; break;
+#ifdef SIGPOLL
+		case SIGPOLL:	signame = "SIGPOLL"; break;
+#endif
+		case SIGPROF:	signame = "SIGPROF"; break;
+		case SIGSYS:	signame = "SIGSYS"; break;
+		case SIGTRAP:	signame = "SIGTRAP"; break;
+		case SIGURG:	signame = "SIGURG"; break;
+		case SIGVTALRM:	signame = "SIGVTALRM"; break;
+		case SIGXCPU:	signame = "SIGXCPU"; break;
+		case SIGXFSZ:	signame = "SIGXFSZ"; break;
+		default:
+				signame = QString::number(WTERMSIG(st));
+				// XX append '@machine-type', like ssh?
+				break;
+		}
+		qint32 flags = 0;
+		if (WCOREDUMP(st))
+			flags |= 1;
+		QString errmsg;
+		QString langtag;		// XXX RFC3066 lang tag?
+		wxs << (qint32)ExitSignal << flags << signame
+			<< errmsg << langtag;
+	}
+	if (!cmsg.isEmpty())
+		shs.sendControl(cmsg);
+
+	// Terminate this shell session
 	this->deleteLater();
 }
 

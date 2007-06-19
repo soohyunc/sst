@@ -25,6 +25,8 @@ public:
 		Terminal,	// Request pseudo-terminal
 		Shell,		// Start a shell process
 		Exec,		// Execute a specific command
+		ExitStatus,	// Indicate remote process's exit status
+		ExitSignal,	// Indicate remote process killed by signal
 	};
 
 	static const char ControlMarker = 1;	// ASCII 'SOH'
@@ -159,9 +161,11 @@ private:
 public:
 	ShellStream(SST::Stream *strm = NULL, QObject *parent = NULL);
 
+	inline SST::Stream *stream() { return strm; }
 	void setStream(SST::Stream *strm);
 
 	Packet receive();
+	bool atEnd() const;
 
 	void sendData(const char *data, int size);
 	inline void sendData(const QByteArray &buf)

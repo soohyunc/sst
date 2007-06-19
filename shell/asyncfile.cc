@@ -61,6 +61,15 @@ bool AsyncFile::open(int fd, OpenMode mode)
 	return true;
 }
 
+void AsyncFile::closeRead()
+{
+	if (snin) {
+		delete snin;
+		snin = NULL;
+	}
+	setOpenMode(openMode() & ~ReadOnly);
+}
+
 bool AsyncFile::isSequential() const
 {
 	return true;

@@ -1,9 +1,36 @@
 #ifndef SHELL_H
 #define SHELL_H
 
+#include <QThread>
+
 #include "stream.h"
 #include "../proto.h"
 #include "../asyncfile.h"
+
+
+class PidWatcher : public QThread
+{
+	Q_OBJECT
+
+private:
+	int pid;
+	int stat;
+
+public:
+	PidWatcher(QObject *parent = NULL);
+
+	/// Start the PidWatcher thread and make it wait on process 'pid'.
+	/// The thread terminates when the designated child process does,
+	/// emitting the QThread::finished() signal.
+	void watchPid(int pid);
+
+	/// After the PidWatcher thread has terminated and emitted finished(),
+	/// the child process's exit status can be obtained from this method.
+	inline int exitStatus() { return stat; }
+
+private:
+	void run();
+};
 
 class ShellSession : public QObject, ShellProtocol
 {
@@ -14,6 +41,8 @@ private:
 	int ptyfd, ttyfd;
 	AsyncFile aftty;
 	QString termname;	// Name for TERM environment variable 
+	PidWatcher pidw;	// To watch for the child process's death
+
 public:
 	ShellSession(SST::Stream *strm, QObject *parent = NULL);
 	~ShellSession();
@@ -33,6 +62,7 @@ private:
 private slots:
 	void inReady();
 	void outReady();
+	void childDone();
 };
 
 class ShellServer : public QObject, public ShellProtocol

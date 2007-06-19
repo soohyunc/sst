@@ -35,6 +35,9 @@ public:
 
 	virtual bool open(int fd, OpenMode mode);
 	virtual void close();
+	void closeRead();
+
+	inline int fileDescriptor() { return fd; }
 
 	/// Always returns true in class AsyncFile.
 	virtual bool isSequential() const;

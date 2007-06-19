@@ -15,6 +15,19 @@
 using namespace SST;
 
 
+static bool termiosChanged;
+static struct termios termiosSave;
+
+static void termiosRestore()
+{
+	if (!termiosChanged)
+		return;
+
+	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &termiosSave) < 0)
+		qDebug("Can't restore terminal settings: %s", strerror(errno));
+	termiosChanged = false;
+}
+
 ShellClient::ShellClient(Host *host, QObject *parent)
 :	QObject(parent),
 	strm(host),
@@ -37,6 +50,15 @@ void ShellClient::setupTerminal(int fd)
 	if (tcgetattr(fd, &tios) < 0)
 		qFatal("Can't get terminal settings: %s", strerror(errno));
 
+	// Save the original terminal settings,
+	// and install an atexit handler to restore them on exit.
+	if (!termiosChanged) {
+		Q_ASSERT(fd == STDIN_FILENO);	// XX
+		termiosSave = tios;
+		termiosChanged = true;
+		atexit(termiosRestore);
+	}
+
 	// Get current window size
 	struct winsize ws;
 	memset(&ws, 0, sizeof(ws));
@@ -57,7 +79,7 @@ void ShellClient::setupTerminal(int fd)
 	shs.sendControl(msg);
 
 	// Turn off terminal input processing
-	tios.c_lflag &= ~(ICANON | ECHO);
+	tios.c_lflag &= ~(ICANON | ISIG | ECHO);
 	if (tcsetattr(fd, TCSAFLUSH, &tios) < 0)
 		qFatal("Can't set terminal settings: %s", strerror(errno));
 }
@@ -98,8 +120,9 @@ void ShellClient::inReady()
 				afin.errorString().toLocal8Bit().data());
 		if (act == 0) {
 			if (afin.atEnd()) {
-				qDebug() << "End of remote shell stream";
-				QCoreApplication::exit(0);
+				qDebug() << "End of local input";
+				afin.closeRead();
+				shs.stream()->shutdown(Stream::Write);
 			}
 			return;
 		}
@@ -117,6 +140,10 @@ void ShellClient::outReady()
 		ShellStream::Packet pkt = shs.receive();
 		switch (pkt.type) {
 		case ShellStream::Null:
+			if (shs.atEnd()) {
+				qDebug() << "End of remote shell stream";
+				QCoreApplication::exit(0);
+			}
 			return;	// Nothing more to receive for now
 		case ShellStream::Data:
 			if (afout.write(pkt.data) < 0)
@@ -133,6 +160,37 @@ void ShellClient::outReady()
 
 void ShellClient::gotControl(const QByteArray &msg)
 {
-	qDebug() << "XXX got control message size" << msg.size();
+	//qDebug() << "got control message size" << msg.size();
+
+	XdrStream rxs(msg);
+	qint32 cmd;
+	rxs >> cmd;
+	switch (cmd) {
+	case ExitStatus: {
+		qint32 code;
+		rxs >> code;
+		if (rxs.status() != rxs.Ok)
+			qDebug() << "invalid ExitStatus control message";
+		qDebug() << "remote process exited with code" << code;
+		QCoreApplication::exit(code);
+		break; }
+
+	case ExitSignal: {
+		qint32 flags;
+		QString signame, errmsg, langtag;
+		rxs >> flags >> signame >> errmsg >> langtag;
+		if (rxs.status() != rxs.Ok)
+			qDebug() << "invalid ExitSignal control message";
+
+		fprintf(stderr, "Remote process terminated by signal %s%s\n",
+				signame.toLocal8Bit().data(),
+				(flags & 1) ? " (core dumped)" : "");
+		QCoreApplication::exit(1);
+		break; }
+
+	default:
+		qDebug() << "unknown control message type" << cmd;
+		break;		// just ignore the control message
+	}
 }
 
