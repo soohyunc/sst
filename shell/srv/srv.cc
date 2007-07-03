@@ -5,6 +5,8 @@
 #include <errno.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 #include "srv.h"
 
