@@ -52,7 +52,7 @@ void MigrateTest::gotConnection()
 	srvs = srv.accept();
 	if (!srvs) return;
 
-	srvs->listen();
+	srvs->listen(Stream::Unlimited);
 
 	connect(srvs, SIGNAL(readyReadMessage()), this, SLOT(gotMessage()));
 }

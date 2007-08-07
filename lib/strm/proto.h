@@ -60,6 +60,9 @@ public:
 	// Maximum transmission unit. XX should be dynamic.
 	static const int mtu = 1200;
 
+	// Minimum receive buffer size. XX should be dynamically based on mtu.
+	static const int minReceiveBuffer = mtu*2;
+
 	// Maximum size of datagram to send using the stateless optimization.
 	// XX should be dynamic.
 	static const int maxStatelessDatagram = mtu * 4;

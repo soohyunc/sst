@@ -31,7 +31,7 @@ StreamFlow::StreamFlow(Host *h, StreamPeer *peer, const QByteArray &peerid)
 	root.ratt[0].setActive(this, sidRoot, 1);
 
 	// Listen on the root stream for top-level application streams
-	root.listen();
+	root.listen(Stream::Unlimited);
 
 	//XXX channel IDs
 

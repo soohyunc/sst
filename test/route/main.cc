@@ -16,11 +16,11 @@
 using namespace SST;
 
 
-#if 0	// Small network
+#if 1	// Small network
 static const int numNodes = 100;	// Number of nodes to simulate
 static const int minRange = 10;		// Minimum and maximum radio range
 static const int maxRange = 20;
-#elif 1	// Slightly larger network
+#elif 0	// Slightly larger network
 static const int numNodes = 300;	// Number of nodes to simulate
 static const int minRange = 6;		// Minimum and maximum radio range
 static const int maxRange = 12;
@@ -786,12 +786,12 @@ int main(int argc, char **argv)
 {
 	QApplication app(argc, argv);
 
-	//setupRandomMesh();
-	setupRandomGraph();
+	setupRandomMesh();
+	//setupRandomGraph();
 
 	Node::computeAffinitySets();
 
-#if 1
+#if 0
 	//Node::announceRoutes();
 	Node::computeRoutes();
 

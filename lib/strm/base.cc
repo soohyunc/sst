@@ -105,8 +105,17 @@ BaseStream::BaseStream(Host *h, QByteArray peerid, BaseStream *parent)
 	ravail(0),
 	rmsgavail(0),
 	rwinbyte(16),		// XX
-	rsn(0)
+	rsn(0),
+	rcvbuf(defaultReceiveBuffer),
+	crcvbuf(defaultReceiveBuffer)
 {
+	// Initialize inherited parameters
+	if (parent) {
+		if (parent->listenMode() & Stream::Inherit)
+			AbstractStream::listen(parent->listenMode());
+		rcvbuf = crcvbuf = parent->crcvbuf;
+	}
+
 	Q_ASSERT(!peerid.isEmpty());
 	this->peerid = peerid;
 	this->peer = h->streamPeer(peerid);
@@ -1446,6 +1455,26 @@ void BaseStream::subReadMessage()
 	// we have to forward that via our readyReadDatagram() signal.
 	if (strm)
 		strm->readyReadDatagram();
+}
+
+void BaseStream::setReceiveBuffer(int size)
+{
+	if (size < minReceiveBuffer) {
+		qWarning("Receive buffer size %d too small, using %d",
+			size, minReceiveBuffer);
+		size = minReceiveBuffer;
+	}
+	rcvbuf = size;
+}
+
+void BaseStream::setChildReceiveBuffer(int size)
+{
+	if (size < minReceiveBuffer) {
+		qWarning("Child receive buffer size %d too small, using %d",
+			size, minReceiveBuffer);
+		size = minReceiveBuffer;
+	}
+	crcvbuf = size;
 }
 
 void BaseStream::shutdown(Stream::ShutdownMode mode)

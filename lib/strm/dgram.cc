@@ -109,6 +109,16 @@ void DatagramStream::shutdown(Stream::ShutdownMode mode)
 	}
 }
 
+void DatagramStream::setReceiveBuffer(int size)
+{
+	// do nothing
+}
+
+void DatagramStream::setChildReceiveBuffer(int size)
+{
+	// do nothing
+}
+
 #ifndef QT_NO_DEBUG
 void DatagramStream::dump()
 {

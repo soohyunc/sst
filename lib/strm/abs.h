@@ -29,6 +29,9 @@ class AbstractStream : public QObject, public StreamProtocol
 	Q_OBJECT
 
 protected:	// XXX private w/ accessors?
+	typedef Stream::ListenMode ListenMode;
+
+
 	// Permanent state
 	Host *const	h;			// Our per-host state
 
@@ -39,10 +42,11 @@ protected:	// XXX private w/ accessors?
 	QByteArray	peerid;
 
 private:
-	int 		pri;			// Current priority level
-	bool		lisn;			// Listen for substreams
+	int 		pri;		// Current priority level
+	ListenMode	lisn;		// Listen for substreams
 
 public:
+	/// Create a new AbstractStream.
 	AbstractStream(Host *host);
 
 	/// Returns the endpoint identifier (EID) of the local host
@@ -182,10 +186,11 @@ public:
 	virtual AbstractStream *openSubstream() = 0;
 
 	/// Listen for incoming substreams on this stream.
-	inline void listen() { lisn = true; }
+	inline void listen(ListenMode mode) { lisn = mode; }
 
 	/// Returns true if this stream is set to accept incoming substreams.
-	inline bool isListening() { return lisn; }
+	inline ListenMode listenMode() { return lisn; }
+	inline bool isListening() { return lisn != 0; }
 
 	/** Accept a waiting incoming substream.
 	 *
@@ -208,6 +213,10 @@ public:
 
 
 	////////// Misc //////////
+
+	// Flow control options
+	virtual void setReceiveBuffer(int size) = 0;
+	virtual void setChildReceiveBuffer(int size) = 0;
 
 	/** Begin graceful or forceful shutdown of the stream.
 	 * If this internal stream control object is "floating" -

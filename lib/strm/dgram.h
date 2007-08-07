@@ -53,6 +53,8 @@ public:
 
 	virtual void shutdown(Stream::ShutdownMode mode);
 
+	virtual void setReceiveBuffer(int size);
+	virtual void setChildReceiveBuffer(int size);
 
 #ifndef QT_NO_DEBUG
 	/// Dump the state of this stream, for debugging purposes.

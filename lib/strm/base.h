@@ -140,6 +140,10 @@ private:
 	typedef StreamRxAttachment RxAttachment;
 
 
+	/// Default receive buffer size for new top-level streams
+	static const int defaultReceiveBuffer = 65536;
+
+
 	// Connection state
 	StreamPeer	*peer;			// Our peer, if usid not Null
 	UniqueStreamId	usid;			// Our UniqueStreamId, or null
@@ -171,6 +175,8 @@ private:
 	QList<RxSegment> rahead;		// Received out of order
 	QQueue<RxSegment> rsegs;		// Received, waiting to be read
 	QQueue<qint64>	rmsgsize;		// Sizes of received messages
+	int		rcvbuf;			// Recv buf size for flow ctl
+	int		crcvbuf;		// Recv buf for child streams
 
 	// Substream receive state
 	QQueue<AbstractStream*> rsubs;		// Received, waiting substreams
@@ -306,6 +312,9 @@ public:
 
 	virtual bool atEnd() const { return endread; }
 
+	virtual void setReceiveBuffer(int size);
+	virtual void setChildReceiveBuffer(int size);
+
 
 	////////// Substreams //////////
 
@@ -318,7 +327,6 @@ public:
 	AbstractStream *getDatagram();
 	virtual int readDatagram(char *data, int maxSize);
 	virtual QByteArray readDatagram(int maxSize);
-
 
 	void shutdown(Stream::ShutdownMode mode);
 

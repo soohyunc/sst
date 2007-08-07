@@ -154,7 +154,7 @@ void TestServer::sstConnection()
 	connect(strm, SIGNAL(newSubstream(Stream*)),
 		ss, SLOT(gotSubstream(Stream*)), Qt::QueuedConnection);
 	strm->setParent(ss);
-	strm->listen();
+	strm->listen(Stream::Unlimited);
 
 	// Check for more queued incoming connections
 	sstConnection();

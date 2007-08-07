@@ -16,6 +16,9 @@
 using namespace SST;
 
 
+static const int maxChildSize = 4;	// pri change request size
+
+
 ////////// SockServer //////////
 
 SockServer::SockServer(QObject *parent, Stream *strm)
@@ -117,7 +120,8 @@ void TestServer::gotConnection()
 	connect(strm, SIGNAL(newSubstream()),
 		ss, SLOT(gotSubstream()), Qt::QueuedConnection);
 	strm->setParent(ss);
-	strm->listen();
+	strm->setChildReceiveBuffer(maxChildSize);
+	strm->listen(Stream::BufLimit);
 
 	// Check for more queued incoming connections
 	gotConnection();

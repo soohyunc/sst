@@ -33,7 +33,9 @@ void WebServer::gotConnection()
 	if (!strm)
 		return;
 
-	strm->listen();
+	strm->setChildReceiveBuffer(sizeof(qint32));	// sizeof pri chng req
+	strm->listen(Stream::BufLimit);
+
 	strm->setParent(this);
 	connect(strm, SIGNAL(readyReadMessage()),
 		this, SLOT(connRead()));

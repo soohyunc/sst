@@ -267,10 +267,10 @@ Stream *Stream::openSubstream()
 	return new Stream(newas, this);
 }
 
-void Stream::listen()
+void Stream::listen(ListenMode mode)
 {
 	if (!as) return setError(tr("Stream not connected"));
-	return as->listen();
+	return as->listen(mode);
 }
 
 bool Stream::isListening() const
@@ -330,6 +330,17 @@ bool Stream::locationHint(const QByteArray &eid, const Endpoint &hint)
 	return true;
 }
 
+void Stream::setReceiveBuffer(int size)
+{
+	if (!as) return;
+	as->setReceiveBuffer(size);
+}
+
+void Stream::setChildReceiveBuffer(int size)
+{
+	if (!as) return;
+	as->setChildReceiveBuffer(size);
+}
 
 void Stream::setError(const QString &errorString)
 {

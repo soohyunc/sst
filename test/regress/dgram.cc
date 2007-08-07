@@ -17,6 +17,10 @@ using namespace SST;
 #define NDGRAMS	100
 
 
+static const int maxDgramP2 = 15;	// XXX Max dgram size: 2^20 = 1MB
+static const int maxDgramSize = 1 << maxDgramP2;
+
+
 DatagramTest::DatagramTest()
 :	clihost(&sim, cliaddr),
 	srvhost(&sim, srvaddr),
@@ -51,7 +55,7 @@ void DatagramTest::gotLinkUp()
 	for (int i = 0; i < NDGRAMS; i++) {
 		buf.resize(1 << p2);
 		cli.writeDatagram(buf, false);
-		if (++p2 > 15)	// XXX Max dgram size: 2^20 = 1MB
+		if (++p2 > maxDgramP2)
 			p2 = 4;
 	}
 }
@@ -64,7 +68,8 @@ void DatagramTest::gotConnection()
 	srvs = srv.accept();
 	if (!srvs) return;
 
-	srvs->listen();
+	srvs->setChildReceiveBuffer(maxDgramSize);
+	srvs->listen(Stream::BufLimit);
 
 	connect(srvs, SIGNAL(readyReadDatagram()),
 		this, SLOT(gotDatagram()));

@@ -75,6 +75,18 @@ class Stream : public QIODevice
 	Q_OBJECT
 
 public:
+	// Flag bits used as arguments to the listen() method,
+	// indicating when and how to accept incoming substreams.
+	enum ListenModeFlag {
+		Reject		= 0,	// Reject incoming substreams
+		BufLimit	= 2,	// Accept subs up to receive buffer size
+		Unlimited	= 3,	// Accept substreams of any size
+		Inherit		= 4,	// Flag: Subs inherit this listen mode
+	};
+	Q_DECLARE_FLAGS(ListenMode, ListenModeFlag)
+
+	// Flag bits used as operands to the shutdown() method,
+	// indicating how and in which direction(s) to shutdown a stream.
 	enum ShutdownModeFlag {
 		Read	= 1,	// Read (incoming data) direction
 		Write	= 2,	// Write (outgoing data) direction
@@ -364,7 +376,7 @@ public:
 	Stream *openSubstream();
 
 	/// Listen for incoming substreams on this stream.
-	void listen();
+	void listen(ListenMode mode);
 
 	/// Returns true if this stream is set to accept incoming substreams.
 	bool isListening() const;
@@ -418,9 +430,11 @@ public:
 	/// Returns the stream's current priority level.
 	int priority();
 
-	/** Control the maximum receive window size for this stream.
-	 */
-	// void setReceiveWindow(int size);
+	/// Control the receive buffer size for this stream.
+	void setReceiveBuffer(int size);
+
+	/// Control the initial receive buffer size for new child streams.
+	void setChildReceiveBuffer(int size);
 
 	/// Returns this stream's current maximum receive window.
 	// inline int receiveWindow();
@@ -576,6 +590,7 @@ private:
 	void connectLinkStatusChanged();
 };
 
+Q_DECLARE_OPERATORS_FOR_FLAGS(Stream::ListenMode)
 Q_DECLARE_OPERATORS_FOR_FLAGS(Stream::ShutdownMode)
 
 
