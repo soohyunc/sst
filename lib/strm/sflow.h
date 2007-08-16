@@ -28,6 +28,7 @@ class StreamFlow : public Flow, public StreamProtocol
 	typedef StreamAttachment Attachment;
 	typedef StreamTxAttachment TxAttachment;
 	typedef StreamRxAttachment RxAttachment;
+	typedef StreamTxRec TxRec;
 
 private:
 	// StreamPeer this flow is associated with.

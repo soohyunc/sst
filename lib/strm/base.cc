@@ -99,9 +99,8 @@ BaseStream::BaseStream(Host *h, QByteArray peerid, BaseStream *parent)
 	endread(false),
 	endwrite(false),
 	tcuratt(NULL),
-	tsn(0),
-	twin(0),
-	tqflow(false),
+	tasn(0), tref(0), twin(0), tqflow(false),
+	tswin(0), tsout(0),
 	ravail(0),
 	rmsgavail(0),
 	rwinbyte(16),		// XX
@@ -407,39 +406,36 @@ void BaseStream::setPriority(int newpri)
 	}
 }
 
-void BaseStream::txqueue(const Packet &pkt)
+void BaseStream::txenqseg(qint32 bsn)
 {
 	// Add the packet to our stream-local transmit queue.
 	// Keep it in order of transmit sequence number.
-	int i = tqueue.size();
-	while (i > 0 && tqueue[i-1].tsn > pkt.tsn)
+	int i = tsegq.size();
+	while (i > 0 && tsegq[i-1] > bsn)
 		i--;
-	tqueue.insert(i, pkt);
+	tsegq.insert(i, bsn);
 
-	// If we don't have a flow, just leave it queued until we do.
+	// Add our stream to our flow's transmit queue
+	txenqflow(true);
+}
+
+void BaseStream::txenqflow(bool immed)
+{
+	// Make sure we're attached to a flow - if not, attach.
 	if (!tcuratt)
 		return tattach();
 	StreamFlow *flow = tcuratt->flow;
 	Q_ASSERT(flow && flow->isActive());
 
-	// Add our stream to our flow's transmit queue
-	txenqflow();
-
-	// Prod the flow to transmit immediately if possible
-	if (flow->mayTransmit())
-		flow->readyTransmit();
-}
-
-void BaseStream::txenqflow()
-{
-	if (!tcuratt)
-		return tattach();
-
-	Q_ASSERT(tcuratt->flow);
-	if (!tqueue.isEmpty() && !tqflow) {
-		tcuratt->flow->enqueueStream(this);
+	// Enqueue this stream to the flow's transmit queue.
+	if (!tqflow && (!tsegq.isEmpty() || !tdgramq.isEmpty())) {
+		flow->enqueueStream(this);
 		tqflow = true;
 	}
+
+	// Prod the flow to transmit immediately if possible
+	if (immed && flow->mayTransmit())
+		flow->readyTransmit();
 }
 
 // Called by StreamFlow::readyTransmit()
@@ -451,7 +447,7 @@ void BaseStream::transmit(StreamFlow *flow)
 	Q_ASSERT(tqflow);
 	Q_ASSERT(tcuratt != NULL);
 	Q_ASSERT(flow == tcuratt->flow);
-	Q_ASSERT(!tqueue.isEmpty());
+	Q_ASSERT(!tsegq.isEmpty() || !tdgramq.isEmpty());
 
 	tqflow = false;	// flow just dequeued us
 
@@ -461,15 +457,21 @@ void BaseStream::transmit(StreamFlow *flow)
 		Q_ASSERT(!init);
 		Q_ASSERT(tcuratt->isActive());
 
-		// Dequeue and transmit the next data packet.
-		Packet p = tqueue.dequeue();
+		// Send any queued datagrams first.
+		// XX is this separate-queue behavior ever a problem?
+		// The problem with having a single queue is that
+		// the segment queue stays sorted in BSN order,
+		// while datagrams are in FIFO order and have no valid BSNs.
+		if (!tdgramq.isEmpty())
+			return txDatagram();
 
-		// Datagrams get special handling.
-		if (p.type == DatagramPacket)
-			return txDatagram(p);
+		// Dequeue and transmit the next data segment.
+		qint32 bsn = tsegq.dequeue();
 
 		// Dequeue and transmit the next data packet.
+		Packet &p = thold[bsn];
 		Q_ASSERT(p.type == DataPacket);
+		Q_ASSERT(p.tsn == bsn);
 		Q_ASSERT(hdrlenData == Flow::hdrlen + sizeof(DataHeader));
 		DataHeader *hdr = (DataHeader*)(p.buf.data() + Flow::hdrlen);
 		hdr->sid = htons(tcuratt->sid);
@@ -482,10 +484,13 @@ void BaseStream::transmit(StreamFlow *flow)
 	}
 
 	// See if we can potentially use an optimized attach/data packet;
-	// this only works for regular stream data, not datagrams,
+	// this only works for regular stream segments, not datagrams,
 	// and only within the first 2^16 bytes of the stream.
-	Packet &hp = tqueue.head();
-	if (hp.type == DataPacket && hp.tsn <= 0xffff) {
+	if (!tsegq.isEmpty() && tsegq.head() <= 0xffff) {
+
+		qint32 bsn = tsegq.head();
+		Packet &hp = thold[bsn];
+		Q_ASSERT(hp.tsn == bsn);
 
 		// See if we can attach stream using an optimized Init packet,
 		// allowing us to indicate the parent with a short 16-bit LSID
@@ -524,8 +529,10 @@ void BaseStream::transmit(StreamFlow *flow)
 
 void BaseStream::txAttachData(PacketType type, StreamId refsid)
 {
-	Packet p = tqueue.dequeue();
+	qint32 bsn = tsegq.dequeue();
+	Packet &p = thold[bsn];
 	Q_ASSERT(p.type == DataPacket);		// caller already checked
+	Q_ASSERT(p.tsn == bsn);
 	Q_ASSERT(p.tsn <= 0xffff);		// caller already checked
 	Q_ASSERT(hdrlenInit == Flow::hdrlen + sizeof(InitHeader));
 
@@ -561,18 +568,19 @@ void BaseStream::txData(Packet &p)
 	return txenqflow();
 }
 
-void BaseStream::txDatagram(Packet &p)
+void BaseStream::txDatagram()
 {
 	//qDebug() << this << "txDatagram";
 
 	// Transmit the whole the datagram immediately,
 	// so that all fragments get consecutive packet sequence numbers.
-	quint8 isend;
 	while (true) {
+		Q_ASSERT(!tdgramq.isEmpty());
+		Packet p = tdgramq.dequeue();
 		Q_ASSERT(p.type == DatagramPacket);
 		DatagramHeader *hdr = (DatagramHeader*)
 						(p.buf.data() + Flow::hdrlen);
-		isend = hdr->type & dgramEndFlag;
+		qint8 atend = hdr->type & dgramEndFlag;
 		hdr->sid = htons(tcuratt->sid);
 		hdr->win = rwinbyte;
 
@@ -581,10 +589,8 @@ void BaseStream::txDatagram(Packet &p)
 		quint64 pktseq;
 		tcuratt->flow->flowTransmit(p.buf, pktseq);
 
-		if (isend)
+		if (atend)
 			break;
-
-		p = tqueue.dequeue();
 	}
 
 	// Re-queue us on our flow immediately
@@ -679,7 +685,7 @@ void BaseStream::missed(StreamFlow *, const Packet &pkt)
 	case DataPacket:
 		qDebug() << this << "retransmit bsn" << pkt.tsn
 			<< "size" << pkt.buf.size() - hdrlenData;
-		txqueue(pkt);	// Retransmit reliable segments
+		txenqseg(pkt.tsn);	// Retransmit reliable segments
 		break;
 	case AttachPacket:
 		qDebug() << "Attach packet lost: retransmitting";
@@ -1304,11 +1310,11 @@ int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 			flags = dataPushFlag | endflags;
 			size = totsize;
 		}
-		//qDebug() << "Transmit segment at" << tsn << "size" << size;
+		//qDebug() << "Transmit segment at" << tasn << "size" << size;
 
 		// Build the appropriate packet header.
 		Packet p(this, DataPacket);
-		p.tsn = tsn;
+		p.tsn = tasn;
 		p.buf.resize(hdrlenData + size);
 
 		// Prepare the header
@@ -1320,14 +1326,17 @@ int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 		p.hdrlen = hdrlenData;
 
 		// Advance the TSN to account for this data.
-		tsn += size;
+		tasn += size;
 
 		// Copy in the application payload
 		char *payload = (char*)(hdr+1);
 		memcpy(payload, data, size);
 
-		// Queue up the packet
-		txqueue(p);
+		// Hold onto the packet data until it gets ACKed
+		thold.insert(p.tsn, p);
+
+		// Queue up the segment for transmission ASAP
+		txenqseg(p.tsn);
 
 		// On to the next segment...
 		data += size;
@@ -1388,7 +1397,7 @@ qint32 BaseStream::writeDatagram(const char *data, qint32 totsize,
 		memcpy(payload, data, size);
 
 		// Queue up the packet
-		txqueue(p);
+		tdgramq.enqueue(p);
 
 		// On to the next fragment...
 		data += size;
@@ -1397,6 +1406,12 @@ qint32 BaseStream::writeDatagram(const char *data, qint32 totsize,
 
 	} while (remain > 0);
 	Q_ASSERT(flags & dgramEndFlag);
+
+	// Once we've enqueued all the fragments of the datagram,
+	// add our stream to our flow's transmit queue,
+	// and start transmitting immediately if possible.
+	txenqflow(true);
+
 	return totsize;
 }
 
@@ -1524,7 +1539,7 @@ void BaseStream::disconnect()
 void BaseStream::dump()
 {
 	qDebug() << "Stream" << this << "state" << state;
-	qDebug() << "  TSN" << tsn << "tqueue" << tqueue.size();
+	qDebug() << "  TSN" << tasn << "tsegq" << tsegq.size();
 	qDebug() << "  RSN" << rsn << "ravail" << ravail
 		<< "rahead" << rahead.size() << "rsegs" << rsegs.size()
 		<< "rmsgavail" << rmsgavail << "rmsgs" << rmsgsize.size();

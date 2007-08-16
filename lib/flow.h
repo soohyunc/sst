@@ -70,6 +70,13 @@ private:
 
 
 public:
+	// How many sequence numbers a packet needs to be out of date
+	// before we consider it to be "missed", i.e., "probably dropped".
+	// This is represents the "standard" Internet convention,
+	// although (XXX) it really needs to be dynamically measured
+	// to account for variable reordering rates on different paths.
+	// XXX static const inst missdelay = 2;
+
 	// Amount of space client must leave at the beginning of a packet
 	// to be transmitted with flowTransmit() or received via flowReceive().
 	// XX won't always be static const.
@@ -249,6 +256,7 @@ protected:
 	virtual void readyTransmit();
 	virtual void acked(quint64 txseq, int npackets, quint64 rxseq);
 	virtual void missed(quint64 txseq, int npackets);
+	//XXX virtual void expire(quint64 txseq, int npackets);
 
 
 private:

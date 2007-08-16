@@ -67,6 +67,34 @@ struct StreamRxAttachment : public StreamAttachment
 };
 
 
+/** @internal Transmit record for a packet transmitted on a stream.
+ */
+struct StreamTxRec
+{
+	BaseStream *strm;
+	qint32 bsn;
+	qint8 type;
+
+	inline StreamTxRec(BaseStream *strm, qint32 bsn, qint8 type)
+		: strm(strm), bsn(bsn), type(type) { }
+};
+
+#if 0
+/** @internal Flow control state node for SST streams.
+ * May be shared by multiple streams having a hereditary relationship.
+ */
+struct StreamTxFlowState
+{
+	qint32	refs;		// Number of streams sharing this flow state
+
+	// Byte-stream flow control
+	qint32	bwin;		// Current receiver-specified window
+
+	// Child stream flow control
+};
+#endif
+
+
 /** @internal Basic internal stream control object.
  * The separation between the internal stream control object
  * and the application-visible Stream object is primarily needed
@@ -138,6 +166,7 @@ private:
 	typedef StreamAttachment Attachment;
 	typedef StreamTxAttachment TxAttachment;
 	typedef StreamRxAttachment RxAttachment;
+	typedef StreamTxRec TxRec;
 
 
 	/// Default receive buffer size for new top-level streams
@@ -161,11 +190,18 @@ private:
 	RxAttachment	ratt[maxAttach];	// Peer's channel attachments
 	TxAttachment	*tcuratt;		// Current transmit-attachment
 
-	// Transmit state
-	qint32		tsn;			// Next SSN to transmit
-	qint32		twin;			// Transmit window size
-	QQueue<Packet>	tqueue;			// Packets to be transmitted
+	// Byte transmit state
+	qint32		tasn;			// Next transmit BSN to assign
+	qint32		tref;			// Transmit window baseline
+	qint32		twin;			// Latest transmit window size
+	QHash<qint32,Packet> thold;		// Segments waiting to be ACKed
+	QQueue<qint32>	tsegq;			// Segments to be transmitted
 	bool		tqflow;			// We're on flow's tx queue
+
+	// Substream transmit state
+	qint32		tswin;			// Transmit substream window
+	qint32		tsout;			// Outstanding substreams
+	QQueue<Packet>	tdgramq;		// Datagrams to be transmitted
 
 	// Byte-stream receive state
 	qint64		ravail;			// Received bytes available
@@ -196,13 +232,13 @@ private:
 	void setUsid(const UniqueStreamId &usid);
 
 	// Data transmission
-	void txqueue(const Packet &pkt);
-	void txenqflow();
+	void txenqseg(qint32 bsn);	// Queue a segment for transmission
+	void txenqflow(bool immed = false);
 	//void txPrepare(Packet &pkt, StreamFlow *flow);
 	void transmit(StreamFlow *flow);
 	void txAttachData(PacketType type, StreamId refsid);
 	void txData(Packet &p);
-	void txDatagram(Packet &p);
+	void txDatagram();
 	void txAttach();
 	static void txReset(StreamFlow *flow, quint16 sid, quint8 flags);
 
