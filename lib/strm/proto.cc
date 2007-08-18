@@ -11,6 +11,7 @@ using namespace SST;
 
 const quint32 StreamProtocol::magic;
 const int StreamProtocol::mtu;
+const int StreamProtocol::minReceiveBuffer;
 
 const int StreamProtocol::hdrlenInit;
 const int StreamProtocol::hdrlenReply;

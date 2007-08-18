@@ -84,19 +84,29 @@ void StreamFlow::detachAll()
 	foreach (BaseStream::Packet p, ackbak) {
 		Q_ASSERT(!p.isNull());
 		Q_ASSERT(p.strm);
-		p.strm->missed(this, p);
+		if (!p.late) {
+			p.late = true;
+			p.strm->missed(this, p);
+		} else
+			p.strm->expire(this, p);
 	}
 }
 
 bool StreamFlow::transmitAck(QByteArray &pkt, quint64 ackseq, unsigned ackct)
 {
+	// Pick a stream on which to send a window update -
+	// for now, just the most recent stream on which we received a segment.
+	RxAttachment *ratt = rxsids.value(acksid);
+	if (ratt == NULL)
+		ratt = rxsids.value(sidRoot);
+
+	// Build a bare Ack packet header
 	if (pkt.size() < hdrlenAck)
 		pkt.resize(hdrlenAck);
 	AckHeader *hdr = (AckHeader*)(pkt.data() + Flow::hdrlen);
-	// XX flow control info for some in-use stream
-	hdr->sid = htons(sidRoot);
+	hdr->sid = htons(ratt->sid);
 	hdr->type = AckPacket << typeShift;
-	hdr->win = 0; // XXX
+	hdr->win = ratt->strm->receiveWindow();
 
 	// Let flow protocol put together its part of the packet and send it.
 	return Flow::transmitAck(pkt, ackseq, ackct);
@@ -122,6 +132,7 @@ void StreamFlow::readyTransmit()
 void StreamFlow::acked(quint64 txseq, int npackets, quint64 rxseq)
 {
 	for (; npackets > 0; txseq++, npackets--) {
+		// find and remove the packet
 		BaseStream::Packet p = ackwait.take(txseq);
 		if (p.isNull())
 			continue;
@@ -135,6 +146,28 @@ void StreamFlow::acked(quint64 txseq, int npackets, quint64 rxseq)
 void StreamFlow::missed(quint64 txseq, int npackets)
 {
 	for (; npackets > 0; txseq++, npackets--) {
+		// find but don't remove (common case for missed packets)
+		if (!ackwait.contains(txseq)) {
+			//qDebug() << "Missed packet" << txseq
+			//	<< "but can't find it!";
+			continue;
+		}
+		BaseStream::Packet &p = ackwait[txseq];
+
+		//qDebug() << "Missed packet" << txseq
+		//	<< "of size" << p.buf.size();
+		if (!p.late) {
+			p.late = true;
+			if (!p.strm->missed(this, p))
+				ackwait.remove(txseq);
+		}
+	}
+}
+
+void StreamFlow::expire(quint64 txseq, int npackets)
+{
+	for (; npackets > 0; txseq++, npackets--) {
+		// find and unconditionally remove packet when it expires
 		BaseStream::Packet p = ackwait.take(txseq);
 		if (p.isNull()) {
 			//qDebug() << "Missed packet" << txseq
@@ -144,7 +177,7 @@ void StreamFlow::missed(quint64 txseq, int npackets)
 
 		//qDebug() << "Missed packet" << txseq
 		//	<< "of size" << p.buf.size();
-		p.strm->missed(this, p);
+		p.strm->expire(this, p);
 	}
 }
 

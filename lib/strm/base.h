@@ -1,6 +1,7 @@
 #ifndef SST_STRM_BASE_H
 #define SST_STRM_BASE_H
 
+#include <QSet>
 #include <QQueue>
 #include <QPointer>
 
@@ -65,7 +66,6 @@ struct StreamRxAttachment : public StreamAttachment
 	// Transition to the unused state.
 	void clear();
 };
-
 
 /** @internal Transmit record for a packet transmitted on a stream.
  */
@@ -133,6 +133,7 @@ private:
 		QByteArray buf;			// Packet buffer incl. headers
 		int hdrlen;			// Size of flow + stream hdrs
 		PacketType type;		// Type of packet
+		bool late;			// on ackwait and presumed lost
 
 		inline Packet() : strm(NULL), type(InvalidPacket) { }
 		inline Packet(BaseStream *strm, PacketType type)
@@ -170,7 +171,8 @@ private:
 
 
 	/// Default receive buffer size for new top-level streams
-	static const int defaultReceiveBuffer = 65536;
+	static const int defaultReceiveBuffer = minReceiveBuffer;
+	//static const int defaultReceiveBuffer = 65536;
 
 
 	// Connection state
@@ -192,27 +194,27 @@ private:
 
 	// Byte transmit state
 	qint32		tasn;			// Next transmit BSN to assign
-	qint32		tref;			// Transmit window baseline
-	qint32		twin;			// Latest transmit window size
-	QHash<qint32,Packet> thold;		// Segments waiting to be ACKed
-	QQueue<qint32>	tsegq;			// Segments to be transmitted
+	qint32		twin;			// Current transmit window
+	qint32		tflt;			// Bytes currently in flight
 	bool		tqflow;			// We're on flow's tx queue
+	QSet<qint32>	twait;			// Segments waiting to be ACKed
+	QQueue<Packet>	tqueue;			// Packets to be transmitted
 
 	// Substream transmit state
 	qint32		tswin;			// Transmit substream window
-	qint32		tsout;			// Outstanding substreams
-	QQueue<Packet>	tdgramq;		// Datagrams to be transmitted
+	qint32		tsflt;			// Outstanding substreams
 
 	// Byte-stream receive state
-	qint64		ravail;			// Received bytes available
-	qint64		rmsgavail;		// Bytes avail in cur message
-	quint8		rwinbyte;		// Receive window log2
 	qint32		rsn;			// Next SSN expected to arrive
+	qint32		ravail;			// Received bytes available
+	qint32		rmsgavail;		// Bytes avail in cur message
+	qint32		rbufused;		// Total buffer space used
+	quint8		rwinbyte;		// Receive window log2
 	QList<RxSegment> rahead;		// Received out of order
 	QQueue<RxSegment> rsegs;		// Received, waiting to be read
 	QQueue<qint64>	rmsgsize;		// Sizes of received messages
-	int		rcvbuf;			// Recv buf size for flow ctl
-	int		crcvbuf;		// Recv buf for child streams
+	qint32		rcvbuf;			// Recv buf size for flow ctl
+	qint32		crcvbuf;		// Recv buf for child streams
 
 	// Substream receive state
 	QQueue<AbstractStream*> rsubs;		// Received, waiting substreams
@@ -232,7 +234,7 @@ private:
 	void setUsid(const UniqueStreamId &usid);
 
 	// Data transmission
-	void txenqseg(qint32 bsn);	// Queue a segment for transmission
+	void txenqueue(const Packet &pkt);	// Queue a pkt for transmission
 	void txenqflow(bool immed = false);
 	//void txPrepare(Packet &pkt, StreamFlow *flow);
 	void transmit(StreamFlow *flow);
@@ -266,10 +268,24 @@ private:
 				quint16 sid, unsigned slot,
 				const UniqueStreamId &usid);
 
+	// Return the next receive window update byte
+	// for some packet we are transmitting on this stream.
+	// XX alternate between byte-window and substream-window updates.
+	inline quint8 receiveWindow() { return rwinbyte; }
+	void calcReceiveWindow();
+
+	void calcTransmitWindow(quint8 win);
+
 	// StreamFlow calls these to return our transmitted packets to us
 	// after being held in ackwait.
+	// The missed() method returns true
+	// if the flow should keep track of the packet until it expires,
+	// at which point it calls expire() and unconditionally removes it.
 	void acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq);
-	void missed(StreamFlow *flow, const Packet &pkt);
+	bool missed(StreamFlow *flow, const Packet &pkt);
+	void expire(StreamFlow *flow, const Packet &pkt);
+
+	void endflight(const Packet &pkt);
 
 	// Disconnect and set an error condition.
 	void fail(const QString &err);

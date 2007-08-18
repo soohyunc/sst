@@ -62,6 +62,15 @@ private:
 	// indexed by assigned transmit sequence number.
 	QHash<qint64,BaseStream::Packet> ackwait;
 
+	// Packets already presumed lost ("missed")
+	// but still waiting for potential acknowledgment until expiry.
+	QHash<qint64,BaseStream::Packet> expwait;
+
+	// RxSID of stream on which we last received a packet -
+	// this determines for which stream we send receive window info
+	// when transmitting "bare" Ack packets.
+	StreamId acksid;
+
 
 	// Attach a stream to this flow, allocating a SID for it if necessary.
 	//StreamId attach(BaseStream *bs, StreamId sid = 0);
@@ -89,6 +98,7 @@ private:
 	virtual bool flowReceive(qint64 rxseq, QByteArray &pkt);
 	virtual void acked(quint64 txseq, int npackets, quint64 rxseq);
 	virtual void missed(quint64 txseq, int npackets);
+	virtual void expire(quint64 txseq, int npackets);
 
 	virtual void start(bool initiator);
 	virtual void stop();

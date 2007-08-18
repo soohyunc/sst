@@ -58,7 +58,11 @@ void StreamTxAttachment::clear()
 			continue;
 
 		// Move the packet back to the stream's transmit queue
-		strm->missed(fl, p);
+		if (!p.late) {
+			p.late = true;
+			strm->missed(fl, p);
+		} else
+			strm->expire(fl, p);
 		fl->ackwait.remove(txseq);
 	}
 }
@@ -99,12 +103,10 @@ BaseStream::BaseStream(Host *h, QByteArray peerid, BaseStream *parent)
 	endread(false),
 	endwrite(false),
 	tcuratt(NULL),
-	tasn(0), tref(0), twin(0), tqflow(false),
-	tswin(0), tsout(0),
-	ravail(0),
-	rmsgavail(0),
-	rwinbyte(16),		// XX
+	tasn(0), twin(0), tflt(0), tqflow(false),
+	tswin(0), tsflt(0),
 	rsn(0),
+	ravail(0), rmsgavail(0), rbufused(0),
 	rcvbuf(defaultReceiveBuffer),
 	crcvbuf(defaultReceiveBuffer)
 {
@@ -114,6 +116,8 @@ BaseStream::BaseStream(Host *h, QByteArray peerid, BaseStream *parent)
 			AbstractStream::listen(parent->listenMode());
 		rcvbuf = crcvbuf = parent->crcvbuf;
 	}
+
+	calcReceiveWindow();	// initialize rwinbyte
 
 	Q_ASSERT(!peerid.isEmpty());
 	this->peerid = peerid;
@@ -406,14 +410,19 @@ void BaseStream::setPriority(int newpri)
 	}
 }
 
-void BaseStream::txenqseg(qint32 bsn)
+void BaseStream::txenqueue(const Packet &pkt)
 {
 	// Add the packet to our stream-local transmit queue.
-	// Keep it in order of transmit sequence number.
-	int i = tsegq.size();
-	while (i > 0 && tsegq[i-1] > bsn)
+	// Keep packets in order of transmit sequence number,
+	// but in FIFO order for packets with the same sequence number.
+	// This happens because datagram packets get assigned the current TSN
+	// when they are queued, but without actually incrementing the TSN,
+	// just to keep them in the right order with respect to segments.
+	// (The assigned TSN is not transmitted in the datagram, of course).
+	int i = tqueue.size();
+	while (i > 0 && (tqueue[i-1].tsn - pkt.tsn) > 0)
 		i--;
-	tsegq.insert(i, bsn);
+	tqueue.insert(i, pkt);
 
 	// Add our stream to our flow's transmit queue
 	txenqflow(true);
@@ -428,7 +437,7 @@ void BaseStream::txenqflow(bool immed)
 	Q_ASSERT(flow && flow->isActive());
 
 	// Enqueue this stream to the flow's transmit queue.
-	if (!tqflow && (!tsegq.isEmpty() || !tdgramq.isEmpty())) {
+	if (!tqflow && !tqueue.isEmpty()) {
 		flow->enqueueStream(this);
 		tqflow = true;
 	}
@@ -447,38 +456,49 @@ void BaseStream::transmit(StreamFlow *flow)
 	Q_ASSERT(tqflow);
 	Q_ASSERT(tcuratt != NULL);
 	Q_ASSERT(flow == tcuratt->flow);
-	Q_ASSERT(!tsegq.isEmpty() || !tdgramq.isEmpty());
+	Q_ASSERT(!tqueue.isEmpty());
 
 	tqflow = false;	// flow just dequeued us
 
+	// First garbage-collect any segments that have already been ACKed;
+	// this can happen if we retransmit a segment
+	// but an ACK for the original arrives late.
+	Packet *hp = &tqueue.head();
+	while (hp->type == DataPacket && !twait.contains(hp->tsn)) {
+		// No longer waiting for this tsn - must have been ACKed.
+		tqueue.removeFirst();
+		if (tqueue.isEmpty())
+			return;
+		hp = &tqueue.head();
+	}
+
+	// Ensure our attachment has been acknowledged before using the SID.
 	if (tcuratt->isAcked()) {
 		// Our attachment has been acknowledged:
 		// an ordinary data packet will do fine.
 		Q_ASSERT(!init);
 		Q_ASSERT(tcuratt->isActive());
 
-		// Send any queued datagrams first.
-		// XX is this separate-queue behavior ever a problem?
-		// The problem with having a single queue is that
-		// the segment queue stays sorted in BSN order,
-		// while datagrams are in FIFO order and have no valid BSNs.
-		if (!tdgramq.isEmpty())
+		// Datagrams get special handling.
+		if (hp->type == DatagramPacket)
 			return txDatagram();
 
-		// Dequeue and transmit the next data segment.
-		qint32 bsn = tsegq.dequeue();
+		// Register the segment as being in-flight.
+		tflt += hp->payloadSize();
+		qDebug() << this << "inflight Data" << hp->tsn
+			<< "bytes in flight" << tflt;
 
-		// Dequeue and transmit the next data packet.
-		Packet &p = thold[bsn];
+		// Dequeue and transmit the next data segment.
+		Packet p = tqueue.dequeue();
 		Q_ASSERT(p.type == DataPacket);
-		Q_ASSERT(p.tsn == bsn);
 		Q_ASSERT(hdrlenData == Flow::hdrlen + sizeof(DataHeader));
+
 		DataHeader *hdr = (DataHeader*)(p.buf.data() + Flow::hdrlen);
 		hdr->sid = htons(tcuratt->sid);
 		hdr->type = (DataPacket << typeShift) |
 				(hdr->type & dataAllFlags);
 			// (flags already set - preserve)
-		hdr->win = rwinbyte;
+		hdr->win = receiveWindow();
 		hdr->tsn = htonl(p.tsn);		// Note: 32-bit TSN
 		return txData(p);
 	}
@@ -486,11 +506,7 @@ void BaseStream::transmit(StreamFlow *flow)
 	// See if we can potentially use an optimized attach/data packet;
 	// this only works for regular stream segments, not datagrams,
 	// and only within the first 2^16 bytes of the stream.
-	if (!tsegq.isEmpty() && tsegq.head() <= 0xffff) {
-
-		qint32 bsn = tsegq.head();
-		Packet &hp = thold[bsn];
-		Q_ASSERT(hp.tsn == bsn);
+	if (hp->type == DataPacket && hp->tsn <= 0xffff) {
 
 		// See if we can attach stream using an optimized Init packet,
 		// allowing us to indicate the parent with a short 16-bit LSID
@@ -506,6 +522,13 @@ void BaseStream::transmit(StreamFlow *flow)
 				&& usid.chanId == flow->txChannelId()
 				&& (quint16)usid.streamCtr == tcuratt->sid) {
 			//qDebug() << "sending Init packet";
+
+			// Adjust the in-flight byte count for flow control.
+			// Init packets get "charged" to the parent stream.
+			parent->tflt += hp->payloadSize();
+			qDebug() << this << "inflight Init" << hp->tsn
+				<< "bytes in flight (parent)" << parent->tflt;
+
 			return txAttachData(InitPacket, parent->tcuratt->sid);
 		}
 
@@ -514,6 +537,12 @@ void BaseStream::transmit(StreamFlow *flow)
 		for (int i = 0; i < maxAttach; i++) {
 			if (ratt[i].flow == flow && ratt[i].isActive()) {
 				//qDebug() << "sending Reply packet";
+
+				// Adjust the in-flight byte count.
+				tflt += hp->payloadSize();
+				qDebug() << this << "inflight Reply" << hp->tsn
+					<< "bytes in flight" << tflt;
+
 				return txAttachData(ReplyPacket, ratt[i].sid);
 			}
 		}
@@ -529,10 +558,8 @@ void BaseStream::transmit(StreamFlow *flow)
 
 void BaseStream::txAttachData(PacketType type, StreamId refsid)
 {
-	qint32 bsn = tsegq.dequeue();
-	Packet &p = thold[bsn];
+	Packet p = tqueue.dequeue();
 	Q_ASSERT(p.type == DataPacket);		// caller already checked
-	Q_ASSERT(p.tsn == bsn);
 	Q_ASSERT(p.tsn <= 0xffff);		// caller already checked
 	Q_ASSERT(hdrlenInit == Flow::hdrlen + sizeof(InitHeader));
 
@@ -541,7 +568,7 @@ void BaseStream::txAttachData(PacketType type, StreamId refsid)
 	hdr->sid = htons(tcuratt->sid);
 	hdr->type = (type << typeShift) | (hdr->type & dataAllFlags);
 			// (flags already set - preserve)
-	hdr->win = rwinbyte;
+	hdr->win = receiveWindow();
 	hdr->rsid = htons(refsid);
 	hdr->tsn = htons(p.tsn);		// Note: 16-bit TSN
 
@@ -561,6 +588,7 @@ void BaseStream::txData(Packet &p)
 	//	<< "posn" << p.tsn << "size" << p.buf.size();
 
 	// Save the data packet in the flow's ackwait hash.
+	p.late = false;
 	flow->ackwait.insert(pktseq, p);
 
 	// Re-queue us on our flow immediately
@@ -575,14 +603,21 @@ void BaseStream::txDatagram()
 	// Transmit the whole the datagram immediately,
 	// so that all fragments get consecutive packet sequence numbers.
 	while (true) {
-		Q_ASSERT(!tdgramq.isEmpty());
-		Packet p = tdgramq.dequeue();
+		Q_ASSERT(!tqueue.isEmpty());
+		Packet p = tqueue.dequeue();
 		Q_ASSERT(p.type == DatagramPacket);
 		DatagramHeader *hdr = (DatagramHeader*)
 						(p.buf.data() + Flow::hdrlen);
 		qint8 atend = hdr->type & dgramEndFlag;
 		hdr->sid = htons(tcuratt->sid);
-		hdr->win = rwinbyte;
+		hdr->win = receiveWindow();
+
+		// Adjust the in-flight byte count.
+		// We don't need to register datagram packets in tflt
+		// because we don't keep them around after they're "missed" -
+		// which is fortunate since we _can't_ register them
+		// because they don't have unique TSNs.
+		tflt += p.payloadSize();
 
 		// Transmit this datagram packet,
 		// but don't save it anywhere - just fire & forget.
@@ -616,7 +651,7 @@ void BaseStream::txAttach()
 	AttachHeader *hdr = (AttachHeader*)(p.buf.data() + Flow::hdrlen);
 	hdr->sid = htons(tcuratt->sid);
 	hdr->type = (AttachPacket << typeShift) | (init ? attachInitFlag : 0)				| slot;
-	hdr->win = rwinbyte;
+	hdr->win = receiveWindow();
 
 	// The body of the Attach packet is the stream's full USID,
 	// and the parent's USID too if we're still initiating the stream.
@@ -633,6 +668,7 @@ void BaseStream::txAttach()
 
 	// Save the attach packet in the flow's ackwait hash,
 	// so that we'll be notified when the attach packet gets acked.
+	p.late = false;
 	flow->ackwait.insert(pktseq, p);
 }
 
@@ -648,6 +684,16 @@ void BaseStream::acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq)
 
 	switch (pkt.type) {
 	case DataPacket:
+		// Record this TSN as having been ACKed,
+		// so that we don't spuriously resend it
+		// if another instance is back in our transmit queue.
+		twait.remove(pkt.tsn);
+
+		// Mark the segment no longer "in flight".
+		endflight(pkt);
+
+		// fall through...
+
 	case AttachPacket:
 		if (tcuratt && tcuratt->flow == flow && !tcuratt->isAcked()) {
 			// We've gotten our first ack for a new attachment.
@@ -666,18 +712,28 @@ void BaseStream::acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq)
 				strm->linkUp();
 		}
 		break;
+
 	case AckPacket:
 		// nothing to do
 		break;
+
+	case DatagramPacket:
+		tflt -= pkt.payloadSize();	// no longer "in flight"
+		Q_ASSERT(tflt >= 0);
+		break;
+
 	// XXX case DetachPacket:
 	// XXX case ResetPacket:
 	default:
 		qDebug() << this << "got ack for unknown packet" << pkt.type;
+		break;
 	}
 }
 
-void BaseStream::missed(StreamFlow *, const Packet &pkt)
+bool BaseStream::missed(StreamFlow *, const Packet &pkt)
 {
+	Q_ASSERT(pkt.late);
+
 	//qDebug() << this << "missed bsn" << pkt.tsn
 	//	<< "size" << pkt.buf.size();
 
@@ -685,16 +741,60 @@ void BaseStream::missed(StreamFlow *, const Packet &pkt)
 	case DataPacket:
 		qDebug() << this << "retransmit bsn" << pkt.tsn
 			<< "size" << pkt.buf.size() - hdrlenData;
-		txenqseg(pkt.tsn);	// Retransmit reliable segments
-		break;
+
+		// Mark the segment no longer "in flight".
+		endflight(pkt);
+
+		txenqueue(pkt);	// Retransmit reliable segments...
+		return true;	// ...but keep the tx record until expiry
+				// in case it gets acked late!
 	case AttachPacket:
-		qDebug() << "Attach packet lost: retransmitting";
+		qDebug() << "Attach packet lost: trying again to attach";
 		txenqflow();
-		break;
+		return true;
+
+	case DatagramPacket:
+		qDebug() << "Datagram packet lost: oops, gone for good";
+
+		// Mark the segment no longer "in flight".
+		// We know we'll only do this once per DatagramPacket
+		// because we drop it immediately below ("return false");
+		// thus acked() cannot be called on it after this.
+		tflt -= pkt.payloadSize();	// no longer "in flight"
+		Q_ASSERT(tflt >= 0);
+
+		return false;
+
 	default:
 		qDebug() << this << "missed unknown packet" << pkt.type;
-		break;
+		return false;
 	}
+}
+
+void BaseStream::expire(StreamFlow *, const Packet &)
+{
+	// do nothing for now
+}
+
+void BaseStream::endflight(const Packet &pkt)
+{
+	// Cancel its allocation in our or our parent stream's state,
+	// according to the type of packet actually sent.
+	DataHeader *hdr = (DataHeader*)(pkt.buf.data() + Flow::hdrlen);
+	if ((hdr->type >> typeShift) == InitPacket) {
+		if (parent) {
+			parent->tflt -= pkt.payloadSize();
+			qDebug() << this << "endflight" << pkt.tsn
+				<< "bytes in flight (parent)"
+				<< parent->tflt;
+			Q_ASSERT(parent->tflt >= 0);
+		}
+	} else {	// Reply or Data packet
+		tflt -= pkt.payloadSize();
+		qDebug() << this << "endflight" << pkt.tsn
+			<< "bytes in flight" << tflt;
+	}
+	Q_ASSERT(tflt >= 0);
 }
 
 // Main packet receive entrypoint, called from StreamFlow::flowReceive()
@@ -738,6 +838,9 @@ bool BaseStream::rxInitPacket(quint64 pktseq, QByteArray &pkt, StreamFlow *flow)
 	if (att != NULL) {
 		if (pktseq < att->sidseq)
 			att->sidseq = pktseq;	// earlier Init; that's OK.
+		flow->acksid = sid;
+		// XXX only calcTransmitWindow if rx'd in-order!?
+		att->strm->calcTransmitWindow(hdr->win);
 		att->strm->rxData(pkt, ntohs(hdr->tsn));
 		return true;	// Acknowledge the packet
 	}
@@ -770,6 +873,9 @@ bool BaseStream::rxInitPacket(quint64 pktseq, QByteArray &pkt, StreamFlow *flow)
 		return false;	// substream creation failed
 
 	// Now process any data segment contained in this Init packet.
+	flow->acksid = sid;
+	// XXX only calcTransmitWindow if rx'd in-order!?
+	nbs->calcTransmitWindow(hdr->win);
 	nbs->rxData(pkt, ntohs(hdr->tsn));
 
 	return false;	// Already acknowledged in rxSubstream().
@@ -844,6 +950,9 @@ bool BaseStream::rxReplyPacket(quint64 pktseq, QByteArray &pkt,
 	if (att != NULL) {
 		if (pktseq < att->sidseq)
 			att->sidseq = pktseq;	// earlier Reply; that's OK.
+		flow->acksid = sid;
+		// XXX only calcTransmitWindow if rx'd in-order!?
+		att->strm->calcTransmitWindow(hdr->win);
 		att->strm->rxData(pkt, ntohs(hdr->tsn));
 		return true;	// Acknowledge the packet
 	}
@@ -873,6 +982,9 @@ bool BaseStream::rxReplyPacket(quint64 pktseq, QByteArray &pkt,
 	bs->ratt[0].setActive(flow, sid, pktseq);
 
 	// Now process any data segment contained in this Init packet.
+	flow->acksid = sid;
+	// XXX only calcTransmitWindow if rx'd in-order!?
+	bs->calcTransmitWindow(hdr->win);
 	bs->rxData(pkt, ntohs(hdr->tsn));
 
 	return true;	// Acknowledge the packet
@@ -903,6 +1015,9 @@ bool BaseStream::rxDataPacket(quint64 pktseq, QByteArray &pkt, StreamFlow *flow)
 	}
 
 	// Process the data, using the full 32-bit TSN.
+	flow->acksid = sid;
+	// XXX only calcTransmitWindow if rx'd in-order!?
+	att->strm->calcTransmitWindow(hdr->win);
 	att->strm->rxData(pkt, ntohl(hdr->tsn));
 
 	return true;	// Acknowledge the packet
@@ -931,6 +1046,15 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 	//qDebug() << this << "received" << rseg.rsn << "size" << segsize
 	//	<< "flags" << rseg.flags() << "stream-rsn" << rsn;
 
+#if 0
+	// See if the sender wasn't supposed to send this segment yet.
+	// For now, whine but accept it anyway... (XX)
+	qint32 rsnhi = byteseq + segsize;
+	if (rsnhi > rwinhi)
+		qDebug() << this << "received segment ending at" << rsnhi
+			<< "but receive window ends at" << rwinhi;
+#endif
+
 	// See where this packet fits in
 	int rsndiff = rseg.rsn - rsn;
 	if (rsndiff <= 0) {
@@ -945,7 +1069,7 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 			// its end doesn't even come up to our current RSN.
 			qDebug() << "Duplicate segment at RSN" << rseg.rsn
 				<< "size" << segsize;
-			return;
+			goto done;
 		}
 		rseg.hdrlen -= rsndiff;	// Merge useless data into "headers"
 		//qDebug() << "actsize" << actsize << "flags" << rseg.flags();
@@ -958,6 +1082,7 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 		rsn += actsize;
 		ravail += actsize;
 		rmsgavail += actsize;
+		rbufused += actsize;
 		if ((rseg.flags() & (dataMessageFlag | dataCloseFlag))
 				&& (rmsgavail > 0)) {
 			qDebug() << this << "received message";
@@ -976,6 +1101,10 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 			if (rsndiff > 0)
 				break;	// There's still a gap
 
+			// Account for removal of this segment from rahead;
+			// below we'll re-add whatever part of it we use.
+			rbufused -= segsize;
+
 			//qDebug() << "Pull segment at" << rseg.rsn
 			//	<< "of size" << segsize
 			//	<< "from reorder buffer";
@@ -990,6 +1119,7 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 			rsn += actsize;
 			ravail += actsize;
 			rmsgavail += actsize;
+			rbufused += actsize;
 			if ((rseg.flags() & (dataMessageFlag | dataCloseFlag))
 					&& (rmsgavail > 0)) {
 				rmsgsize.enqueue(rmsgavail);
@@ -1010,7 +1140,7 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 				strm->readyRead();
 				strm->readyReadMessage();
 			}
-			return;
+			goto done;
 		}
 
 		// Notify the client if appropriate
@@ -1039,7 +1169,8 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 		if (hi > 0 && (rahead[hi-1].rsn - rsn) < rsndiff) {
 			// Common case: belongs at end of rahead list.
 			rahead.append(rseg);
-			return;
+			rbufused += segsize;
+			goto done;
 		}
 
 		// Binary search for the correct position.
@@ -1058,11 +1189,17 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 				&& rseg.flags() == rahead[lo].flags()) {
 			qDebug("rxseg duplicate out-of-order segment - RSN %d",
 				rseg.rsn);
-			return;
+			goto done;
 		}
 
+		rbufused += segsize;
 		rahead.insert(lo, rseg);
 	}
+	done:
+
+	// Recalculate the receive window now that we've probably
+	// consumed some buffer space.
+	calcReceiveWindow();
 }
 
 bool BaseStream::rxDatagramPacket(quint64 pktseq, QByteArray &pkt,
@@ -1086,9 +1223,13 @@ bool BaseStream::rxDatagramPacket(quint64 pktseq, QByteArray &pkt,
 		txReset(flow, sid, resetDirFlag);
 		return false;
 	}
+	flow->acksid = sid;
 	if (pktseq < att->sidseq)
 		return false;	// silently drop stale packet
 	BaseStream *bs = att->strm;
+
+	// XXX only calcTransmitWindow if rx'd in-order!?
+	//bs->calcTransmitWindow(hdr->win);	XXX ???
 
 	if (bs->state != Connected)
 		goto resetsid;	// Only accept datagrams while connected
@@ -1119,6 +1260,10 @@ bool BaseStream::rxAckPacket(quint64 pktseq, QByteArray &pkt,
 {
 	// XXX use flow control info
 	(void)pkt;
+
+	// Use the window update information from the Ack.
+	// XXX only calcTransmitWindow if rx'd in-order!?
+	// bs->calcTransmitWindow(hdr->win);	XXX !!!
 
 	// Count this explicit ack packet as received,
 	// but do NOT send another ack just to ack this ack!
@@ -1211,6 +1356,38 @@ bool BaseStream::rxDetachPacket(quint64 pktseq, QByteArray &pkt,
 	return false;
 }
 
+void BaseStream::calcReceiveWindow()
+{
+	Q_ASSERT(rcvbuf > 0);
+
+	// Calculate the current receive window size
+	qint32 rwin = qMax(0, rcvbuf - rbufused);
+
+	// If all of our buffer usage consists of out-of-order packets,
+	// ensure that the sender can make progress toward filling the gaps.
+	// This should only ever be an issue
+	// if we shrink the receive window abruptly,
+	// leaving gaps in a formerly-large window.
+	// (It's best just to avoid shrinking the receive window abruptly.)
+	if (ravail == 0 && rbufused > 0)
+		rwin = qMax(rwin, minReceiveBuffer);
+
+	// Calculate the conservative receive window exponent
+	int i = 0;
+	while (((2 << i) - 1) <= rwin)
+		i++;
+	rwinbyte = i;	// XX control bits?
+
+	qDebug() << this << "buffered" << ravail << "+" << (rbufused - ravail)
+		<< "rwin" << rwin << "exp" << i;
+}
+
+void BaseStream::calcTransmitWindow(quint8 win)
+{
+	int i = win & 0x1f;
+	twin = (1 << i) - 1;
+}
+
 int BaseStream::readData(char *data, int maxSize)
 {
 	int actSize = 0;
@@ -1235,6 +1412,7 @@ int BaseStream::readData(char *data, int maxSize)
 
 		// Adjust the receive stats
 		ravail -= size;
+		rbufused -= size;
 		Q_ASSERT(ravail >= 0);
 		if (hasPendingMessages()) {
 
@@ -1259,6 +1437,11 @@ int BaseStream::readData(char *data, int maxSize)
 		if (rseg.flags() & dataCloseFlag)
 			shutdown(Stream::Read);
 	}
+
+	// Recalculate the receive window,
+	// now that we've (presumably) freed some buffer space.
+	calcReceiveWindow();
+
 	return actSize;
 }
 
@@ -1333,10 +1516,10 @@ int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 		memcpy(payload, data, size);
 
 		// Hold onto the packet data until it gets ACKed
-		thold.insert(p.tsn, p);
+		twait.insert(p.tsn);
 
 		// Queue up the segment for transmission ASAP
-		txenqseg(p.tsn);
+		txenqueue(p);
 
 		// On to the next segment...
 		data += size;
@@ -1380,6 +1563,12 @@ qint32 BaseStream::writeDatagram(const char *data, qint32 totsize,
 		Packet p(this, DatagramPacket);
 		char *payload;
 
+		// Assign this packet an ASN as if it were a data segment,
+		// but don't actually allocate any TSN bytes to it -
+		// this positions the datagram in FIFO order in tqueue.
+		// XX is this necessarily what we actually want?
+		p.tsn = tasn;
+
 		// Build the DatagramHeader.
 		p.buf.resize(hdrlenDatagram + size);
 		Q_ASSERT(hdrlenDatagram == Flow::hdrlen
@@ -1397,7 +1586,7 @@ qint32 BaseStream::writeDatagram(const char *data, qint32 totsize,
 		memcpy(payload, data, size);
 
 		// Queue up the packet
-		tdgramq.enqueue(p);
+		txenqueue(p);
 
 		// On to the next fragment...
 		data += size;
@@ -1503,6 +1692,7 @@ void BaseStream::shutdown(Stream::ShutdownMode mode)
 		// Shutdown for reading
 		ravail = 0;
 		rmsgavail = 0;
+		rbufused = 0;
 		rahead.clear();
 		rsegs.clear();
 		rmsgsize.clear();
@@ -1539,7 +1729,7 @@ void BaseStream::disconnect()
 void BaseStream::dump()
 {
 	qDebug() << "Stream" << this << "state" << state;
-	qDebug() << "  TSN" << tasn << "tsegq" << tsegq.size();
+	qDebug() << "  TSN" << tasn << "tqueue" << tqueue.size();
 	qDebug() << "  RSN" << rsn << "ravail" << ravail
 		<< "rahead" << rahead.size() << "rsegs" << rsegs.size()
 		<< "rmsgavail" << rmsgavail << "rmsgs" << rmsgsize.size();

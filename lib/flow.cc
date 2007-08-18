@@ -254,6 +254,9 @@ void Flow::rtxTimeout(bool fail)
 
 		// Must do this last, since it may transmit new packets
 		missed(txackseq-ackdiff+1, ackdiff);
+
+		// Finally, notice packets going out-of-window
+		expire(txackseq-maskBits+1-ackdiff, ackdiff);
 	}
 
 	// Force at least one new packet transmission regardless of cwnd.
@@ -411,6 +414,9 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 
 		// Notify the upper layer of the acknowledged packets
 		acked(txackseq - newpackets + 1, newpackets, pktseq);
+
+		// Finally, notice packets going out-of-window
+		expire(txackseq-maskBits+1-ackdiff, ackdiff);
 
 		// Reset the retransmission timer, since we've made progress.
 		// Only re-arm it if there's still outstanding unACKed data.
@@ -739,6 +745,10 @@ void Flow::acked(quint64, int, quint64)
 }
 
 void Flow::missed(quint64, int)
+{
+}
+
+void Flow::expire(quint64, int)
 {
 }
 

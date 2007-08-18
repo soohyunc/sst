@@ -256,7 +256,7 @@ protected:
 	virtual void readyTransmit();
 	virtual void acked(quint64 txseq, int npackets, quint64 rxseq);
 	virtual void missed(quint64 txseq, int npackets);
-	//XXX virtual void expire(quint64 txseq, int npackets);
+	virtual void expire(quint64 txseq, int npackets);
 
 
 private:
