@@ -171,8 +171,8 @@ private:
 
 
 	/// Default receive buffer size for new top-level streams
-	static const int defaultReceiveBuffer = minReceiveBuffer;
-	//static const int defaultReceiveBuffer = 65536;
+	//static const int defaultReceiveBuffer = minReceiveBuffer;
+	static const int defaultReceiveBuffer = 65536;
 
 
 	// Connection state

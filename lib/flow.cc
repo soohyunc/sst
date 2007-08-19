@@ -47,7 +47,7 @@ Flow::Flow(Host *host, QObject *parent)
 	cc(NULL),
 	rtxtimer(host),
 	linkstat(LinkDown),
-	delayack(true),
+	delayack(false), // XXX breaks current brain-damaged flow control
 	acktimer(host),
 	statstimer(host)
 {

@@ -450,7 +450,10 @@ void BaseStream::txenqflow(bool immed)
 // Called by StreamFlow::readyTransmit()
 // to transmit or retransmit one packet on a given flow.
 // That packet might have to be an attach packet
-// if we haven't finished attaching yet.
+// if we haven't finished attaching yet,
+// or it might have to be an empty segment
+// if we've run out of transmit window space
+// but our latest receive window update may be out-of-date.
 void BaseStream::transmit(StreamFlow *flow)
 {
 	Q_ASSERT(tqflow);
@@ -473,11 +476,21 @@ void BaseStream::transmit(StreamFlow *flow)
 	}
 
 	// Ensure our attachment has been acknowledged before using the SID.
+	int segsize = hp->payloadSize();
 	if (tcuratt->isAcked()) {
 		// Our attachment has been acknowledged:
 		// an ordinary data packet will do fine.
 		Q_ASSERT(!init);
 		Q_ASSERT(tcuratt->isActive());
+
+		// Throttle data transmission if flow window is full
+		if (tflt + segsize > twin) {
+			qDebug() << this << "transmit window full:"
+				<< "need" << (tflt + segsize)
+				<< "have" << twin;
+			// XXX query status if latest update is out-of-date!
+			return;
+		}
 
 		// Datagrams get special handling.
 		if (hp->type == DatagramPacket)
@@ -488,7 +501,7 @@ void BaseStream::transmit(StreamFlow *flow)
 		qDebug() << this << "inflight Data" << hp->tsn
 			<< "bytes in flight" << tflt;
 
-		// Dequeue and transmit the next data segment.
+		// Transmit the next segment in a regular Data packet.
 		Packet p = tqueue.dequeue();
 		Q_ASSERT(p.type == DataPacket);
 		Q_ASSERT(hdrlenData == Flow::hdrlen + sizeof(DataHeader));
@@ -520,7 +533,8 @@ void BaseStream::transmit(StreamFlow *flow)
 				&& parent->tcuratt->flow == flow
 				&& parent->tcuratt->isActive()
 				&& usid.chanId == flow->txChannelId()
-				&& (quint16)usid.streamCtr == tcuratt->sid) {
+				&& (quint16)usid.streamCtr == tcuratt->sid
+			/* XXX	&& parent->tflt + segsize <= parent->twin*/) {
 			//qDebug() << "sending Init packet";
 
 			// Adjust the in-flight byte count for flow control.
@@ -534,6 +548,8 @@ void BaseStream::transmit(StreamFlow *flow)
 
 		// See if our peer has this stream in its SID space,
 		// allowing us to attach using an optimized Reply packet.
+		if (tflt + segsize > twin)
+			goto noReply;	// no room for data: just Attach
 		for (int i = 0; i < maxAttach; i++) {
 			if (ratt[i].flow == flow && ratt[i].isActive()) {
 				//qDebug() << "sending Reply packet";
@@ -546,6 +562,7 @@ void BaseStream::transmit(StreamFlow *flow)
 				return txAttachData(ReplyPacket, ratt[i].sid);
 			}
 		}
+		noReply: ;
 	}
 
 	// We've exhausted all of our optimized-path options:
@@ -1258,17 +1275,39 @@ bool BaseStream::rxDatagramPacket(quint64 pktseq, QByteArray &pkt,
 bool BaseStream::rxAckPacket(quint64 pktseq, QByteArray &pkt,
 				StreamFlow *flow)
 {
-	// XXX use flow control info
-	(void)pkt;
-
-	// Use the window update information from the Ack.
-	// XXX only calcTransmitWindow if rx'd in-order!?
-	// bs->calcTransmitWindow(hdr->win);	XXX !!!
+	qDebug() << "rxAckPacket";
 
 	// Count this explicit ack packet as received,
 	// but do NOT send another ack just to ack this ack!
 	flow->received(pktseq, false);
-	return false;
+
+	// Decode the packet header
+	StreamHeader *hdr = (StreamHeader*)(pkt.data() + Flow::hdrlen);
+
+	// Look up the stream the data packet belongs to.
+	// The SID field in an Ack packet is in our transmit SID space,
+	// because it reflects data our peer is receiving.
+	quint16 sid = ntohs(hdr->sid);
+	Attachment *att = flow->txsids.value(sid);
+	if (att == NULL) {
+		// Respond with a reset for the unknown stream ID.
+		// Ack the pktseq first so peer won't ignore the reset!
+		qDebug("rxAckPacket: unknown stream ID");
+#if 0	// XXX do we want to do this, or not ???
+		txReset(flow, sid, resetDirFlag);
+#endif
+		return false;
+	}
+	if (pktseq < att->sidseq) {
+		qDebug() << "rxDataPacket: stale wrt sidseq";
+		return false;	// silently drop stale packet
+	}
+
+	// Process the receive window update.
+	// XXX only calcTransmitWindow if rx'd in-order!?
+	att->strm->calcTransmitWindow(hdr->win);
+
+	return false;	// Already accepted the packet above.
 }
 
 bool BaseStream::rxResetPacket(quint64 pktseq, QByteArray &pkt,
@@ -1312,6 +1351,7 @@ bool BaseStream::rxAttachPacket(quint64 pktseq, QByteArray &pkt,
 	BaseStream *bs = peer->usids.value(usid);
 	if (bs != NULL) {
 		// Found it: the stream already exists, just attach it.
+		flow->acksid = sid;
 		RxAttachment &rslot = bs->ratt[slot];
 		if (rslot.isActive()) {
 			if (rslot.flow == flow &&
@@ -1335,6 +1375,7 @@ bool BaseStream::rxAttachPacket(quint64 pktseq, QByteArray &pkt,
 		pbs = peer->usids.value(pusid);
 	if (pbs != NULL) {
 		// Found it: create and attach a child stream.
+		flow->acksid = sid;
 		bs = pbs->rxSubstream(pktseq, flow, sid, slot, usid);
 		if (bs == NULL)
 			return false;	// Substream creation failed
@@ -1384,8 +1425,17 @@ void BaseStream::calcReceiveWindow()
 
 void BaseStream::calcTransmitWindow(quint8 win)
 {
+	qint32 oldtwin = twin;
+
+	// Calculate the new transmit window
 	int i = win & 0x1f;
 	twin = (1 << i) - 1;
+
+	qDebug() << this << "transmit window" << oldtwin << "->" << twin
+		<< "in use" << tflt;
+
+	if (twin > oldtwin)
+		txenqflow(true);
 }
 
 int BaseStream::readData(char *data, int maxSize)
