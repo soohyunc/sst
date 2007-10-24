@@ -4,8 +4,10 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <termios.h>
+#include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <signal.h>
 
 #include "srv.h"
