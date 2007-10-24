@@ -151,6 +151,7 @@ void StreamPeer::regClientDestroyed(QObject *obj)
 void StreamPeer::foundEndpoint(const Endpoint &ep)
 {
 	Q_ASSERT(!id.isEmpty());
+	Q_ASSERT(!ep.isNull());
 
 	if (addrs.contains(ep))
 		return;	// We know; sit down...
@@ -168,6 +169,8 @@ void StreamPeer::foundEndpoint(const Endpoint &ep)
 
 void StreamPeer::initiate(Socket *sock, const Endpoint &ep)
 {
+	Q_ASSERT(!ep.isNull());
+
 	// No need to initiate new flows if we already have a working one...
 	if (flow && flow->linkStatus() == LinkUp)
 		return;

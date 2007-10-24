@@ -46,19 +46,14 @@ Stream::~Stream()
 
 bool Stream::connectTo(const QByteArray &dstid,
 			const QString &service, const QString &protocol,
-			const QList<Endpoint> &dsteps)
+			const Endpoint &dstep)
 {
 	// Determine a suitable target EID.
 	// If the caller didn't specify one (doesn't know the target's EID),
-	// then use the first location hint as a surrogate peer identity.
+	// then use the location hint as a surrogate peer identity.
 	QByteArray eid = dstid;
 	if (eid.isEmpty()) {
-		if (dsteps.isEmpty()) {
-			setError(tr("Stream::connectTo: empty target EID "
-					"and no location hints"));
-			return false;
-		}
-		eid = Ident::fromEndpoint(dsteps[0]).id();
+		eid = Ident::fromEndpoint(dstep).id();
 		Q_ASSERT(!eid.isEmpty());
 	}
 
@@ -76,38 +71,24 @@ bool Stream::connectTo(const QByteArray &dstid,
 	connectLinkStatusChanged();
 
 	// Start the actual network connection process
-	cs->connectTo(service, protocol, dsteps);
+	cs->connectTo(service, protocol);
 
 	// We allow the client to start "sending" data immediately
 	// even before the stream has fully connected.
 	setOpenMode(ReadWrite | Unbuffered);
+
+	// If we were given a location hint, record it for setting up flows.
+	if (!dstep.isNull())
+		connectAt(dstep);
 
 	return true;
 }
 
 bool Stream::connectTo(const Ident &dstid,
 		const QString &service, const QString &protocol,
-		const QList<Endpoint> &dsteps)
-{
-	return connectTo(dstid.id(), service, protocol, dsteps);
-}
-
-bool Stream::connectTo(const QByteArray &dstid,
-		const QString &service, const QString &protocol,
 		const Endpoint &dstep)
 {
-	QList<Endpoint> dsteps;
-	dsteps.append(dstep);
-	return connectTo(dstid, service, protocol, dsteps);
-}
-
-bool Stream::connectTo(const Ident &dstid,
-		const QString &service, const QString &protocol,
-		const Endpoint &dstep)
-{
-	QList<Endpoint> dsteps;
-	dsteps.append(dstep);
-	return connectTo(dstid, service, protocol, dsteps);
+	return connectTo(dstid.id(), service, protocol, dstep);
 }
 
 void Stream::disconnect()
@@ -139,7 +120,7 @@ bool Stream::isConnected()
 	return as != NULL;
 }
 
-void Stream::foundPeerEndpoint(const Endpoint &ep)
+void Stream::connectAt(const Endpoint &ep)
 {
 	if (!as) return;
 	host->streamPeer(as->peerid)->foundEndpoint(ep);

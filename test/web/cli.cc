@@ -233,7 +233,7 @@ void WebClient::setPriorities()
 	int end = webview->cursorForPosition(
 				QPoint(webview->width(),webview->height()))
 			.position();
-	qDebug() << "window:" << start << "to" << end;
+	//qDebug() << "window:" << start << "to" << end;
 
 	for (int i = 0; i < images.size(); i++) {
 		WebImage &wi = images[i];

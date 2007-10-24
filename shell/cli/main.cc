@@ -109,7 +109,11 @@ int main(int argc, char **argv)
 
 	// Connect to the shell service
 	ShellClient sc(&host);
-	sc.connectTo(eid, eps);
+	sc.connectTo(eid);
+
+	// Register the list of target address hints
+	foreach (const Endpoint &ep, eps)
+		sc.connectAt(ep);
 
 	// Set up the pseudo-tty on the server side, if appropriate.
 	if (isatty(STDIN_FILENO))

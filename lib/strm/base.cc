@@ -166,8 +166,7 @@ void BaseStream::clear()
 	rsubs.clear();
 }
 
-void BaseStream::connectTo(const QString &service, const QString &protocol,
-			const QList<Endpoint> &dsteps)
+void BaseStream::connectTo(const QString &service, const QString &protocol)
 {
 	Q_ASSERT(!service.isEmpty());
 	Q_ASSERT(state == Fresh);
@@ -175,10 +174,6 @@ void BaseStream::connectTo(const QString &service, const QString &protocol,
 
 	// Find or create the Target struct for the destination ID
 	toplev = true;
-
-	// If we were given a location hint, record it for setting up flows.
-	foreach (const Endpoint &ep, dsteps)
-		peer->foundEndpoint(ep);
 
 	// Queue up a service connect message onto the new stream.
 	// This will only go out once we actually attach to a flow,
@@ -498,8 +493,8 @@ void BaseStream::transmit(StreamFlow *flow)
 
 		// Register the segment as being in-flight.
 		tflt += hp->payloadSize();
-		qDebug() << this << "inflight Data" << hp->tsn
-			<< "bytes in flight" << tflt;
+		//qDebug() << this << "inflight Data" << hp->tsn
+		//	<< "bytes in flight" << tflt;
 
 		// Transmit the next segment in a regular Data packet.
 		Packet p = tqueue.dequeue();
@@ -801,15 +796,15 @@ void BaseStream::endflight(const Packet &pkt)
 	if ((hdr->type >> typeShift) == InitPacket) {
 		if (parent) {
 			parent->tflt -= pkt.payloadSize();
-			qDebug() << this << "endflight" << pkt.tsn
-				<< "bytes in flight (parent)"
-				<< parent->tflt;
+			//qDebug() << this << "endflight" << pkt.tsn
+			//	<< "bytes in flight (parent)"
+			//	<< parent->tflt;
 			Q_ASSERT(parent->tflt >= 0);
 		}
 	} else {	// Reply or Data packet
 		tflt -= pkt.payloadSize();
-		qDebug() << this << "endflight" << pkt.tsn
-			<< "bytes in flight" << tflt;
+		//qDebug() << this << "endflight" << pkt.tsn
+		//	<< "bytes in flight" << tflt;
 	}
 	Q_ASSERT(tflt >= 0);
 }
@@ -1275,7 +1270,7 @@ bool BaseStream::rxDatagramPacket(quint64 pktseq, QByteArray &pkt,
 bool BaseStream::rxAckPacket(quint64 pktseq, QByteArray &pkt,
 				StreamFlow *flow)
 {
-	qDebug() << "rxAckPacket";
+	//qDebug() << "rxAckPacket" << this;
 
 	// Count this explicit ack packet as received,
 	// but do NOT send another ack just to ack this ack!
@@ -1419,8 +1414,8 @@ void BaseStream::calcReceiveWindow()
 		i++;
 	rwinbyte = i;	// XX control bits?
 
-	qDebug() << this << "buffered" << ravail << "+" << (rbufused - ravail)
-		<< "rwin" << rwin << "exp" << i;
+	//qDebug() << this << "buffered" << ravail << "+" << (rbufused - ravail)
+	//	<< "rwin" << rwin << "exp" << i;
 }
 
 void BaseStream::calcTransmitWindow(quint8 win)
@@ -1431,8 +1426,8 @@ void BaseStream::calcTransmitWindow(quint8 win)
 	int i = win & 0x1f;
 	twin = (1 << i) - 1;
 
-	qDebug() << this << "transmit window" << oldtwin << "->" << twin
-		<< "in use" << tflt;
+	//qDebug() << this << "transmit window" << oldtwin << "->" << twin
+	//	<< "in use" << tflt;
 
 	if (twin > oldtwin)
 		txenqflow(true);

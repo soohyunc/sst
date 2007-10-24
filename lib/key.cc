@@ -539,6 +539,7 @@ KeyInitiator::KeyInitiator(Flow *fl, quint32 magic,
 	txtimer(fl->host())
 {
 	qDebug() << this << "initiating to" << sepr;
+	Q_ASSERT(!sepr.isNull());
 	Q_ASSERT(fl->isBound());
 	Q_ASSERT(!fl->isActive());
 	fl->setParent(this);

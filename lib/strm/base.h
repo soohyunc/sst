@@ -335,8 +335,7 @@ public:
 	 *		if the dstid is a non-cryptographic legacy address.
 	 * @see Ident
 	 */
-	void connectTo(const QString &service, const QString &protocol,
-			const QList<Endpoint> &dsteps);
+	void connectTo(const QString &service, const QString &protocol);
 
 	/// Returns true if the underlying link is currently connected
 	/// and usable for data transfer.

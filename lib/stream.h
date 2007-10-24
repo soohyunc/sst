@@ -165,25 +165,13 @@ public:
 	 */
 	bool connectTo(const QByteArray &dstid,
 			const QString &service, const QString &protocol,
-			const QList<Endpoint> &dsteps = QList<Endpoint>());
+			const Endpoint &dstep = Endpoint());
 
 	/** Connect to a given service and protocol on a remote host.
 	 * @overload */
 	bool connectTo(const Ident &dstid,
 			const QString &service, const QString &protocol,
-			const QList<Endpoint> &dsteps = QList<Endpoint>());
-
-	/** Connect to a given service and protocol on a remote host.
-	 * @overload */
-	bool connectTo(const QByteArray &dstid,
-			const QString &service, const QString &protocol,
-			const Endpoint &dstep);
-
-	/** Connect to a given service and protocol on a remote host.
-	 * @overload */
-	bool connectTo(const Ident &dstid,
-			const QString &service, const QString &protocol,
-			const Endpoint &dstep);
+			const Endpoint &dstep = Endpoint());
 
 	/** Disconnect the stream from its current peer.
 	 * This method immediately returns the stream to the unconnected state:
@@ -205,11 +193,11 @@ public:
 	 */
 	bool isConnected();
 
-	/** Provide a new or additional address hint.
+	/** Provide a new or additional peer address/location hint.
 	 * May be called at any time, e.g., if the target host has migrated,
 	 * to give SST a hint at where it might find the target
 	 * in order to re-establish connectivity. */
-	void foundPeerEndpoint(const Endpoint &ep);
+	void connectAt(const Endpoint &ep);
 
 
 	////////// Reading Data //////////

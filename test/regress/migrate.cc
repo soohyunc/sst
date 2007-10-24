@@ -37,8 +37,8 @@ MigrateTest::MigrateTest()
 
 	// Open a connection to the server
 	connect(&cli, SIGNAL(readyReadMessage()), this, SLOT(gotMessage()));
-	cli.connectTo(srvhost.hostIdent(), "regress", "migrate",
-			Endpoint(srvaddr, NETSTERIA_DEFAULT_PORT));
+	cli.connectTo(srvhost.hostIdent(), "regress", "migrate");
+	cli.connectAt(Endpoint(srvaddr, NETSTERIA_DEFAULT_PORT));
 
 	// Get the ping-pong process going...
 	ping(&cli);
@@ -107,7 +107,7 @@ void MigrateTest::gotTimeout()
 	// Migrate!
 	qDebug() << "migrating to" << newaddr;
 	clihost.setHostAddress(newaddr);
-	srvs->foundPeerEndpoint(Endpoint(newaddr, NETSTERIA_DEFAULT_PORT));
+	srvs->connectAt(Endpoint(newaddr, NETSTERIA_DEFAULT_PORT));
 
 	// Start the next cycle...
 	starttime = clihost.currentTime();
