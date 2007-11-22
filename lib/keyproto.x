@@ -24,6 +24,7 @@ struct KeyChunkChkR1Data {
 	unsigned int	cki;		// Initiator's checksum key, echoed
 	unsigned int	ckr;		// Responder's checksum key,
 					// = cki if cookie required
+			// XXX eliminate - prevents zero-RT data piggybacking
 	unsigned char	chanr;		// Responder's channel number,
 					// 0 if cookie required
 	opaque		cookie<>;	// Responder's cookie, if any
