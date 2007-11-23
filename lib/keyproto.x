@@ -19,16 +19,17 @@ struct KeyChunkChkI1Data {
 	unsigned char	chani;		// Initiator's channel number
 	opaque		cookie<>;	// Responder's cookie, if any
 	opaque		ulpi<>;		// Upper-level protocol data
+	opaque		cpkt<>;		// Piggybacked channel packet
 };
 struct KeyChunkChkR1Data {
 	unsigned int	cki;		// Initiator's checksum key, echoed
 	unsigned int	ckr;		// Responder's checksum key,
-					// = cki if cookie required
-			// XXX eliminate - prevents zero-RT data piggybacking
+					// = 0 if cookie required
 	unsigned char	chanr;		// Responder's channel number,
 					// 0 if cookie required
 	opaque		cookie<>;	// Responder's cookie, if any
 	opaque		ulpr<>;		// Upper-level protocol data
+	opaque		cpkt<>;		// Piggybacked channel packet
 };
 
 
