@@ -6,7 +6,7 @@ LIBS += -L../.. -lsst_test -lsst
 DEPENDPATH += . ../../lib ../lib
 INCLUDEPATH += . ../../lib ../lib
 QT = core network gui
-POST_TARGETDEPS += ../../libsst.a ../../libsst_test.a
+POST_TARGETDEPS += ../../libsst.* ../../libsst_test.*
 #CONFIG -= app_bundle
 
 # Include variables filled in by the configure script

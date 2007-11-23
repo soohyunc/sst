@@ -10,17 +10,19 @@ DESTDIR = ..
 DEPENDPATH += .
 INCLUDEPATH += .
 QT = core network
-CONFIG += staticlib
+CONFIG += $$LIBTYPE
 QMAKE_CXXFLAGS += -fno-strict-aliasing	# XXX
 
 # Input
+STRM_HEADERS = strm/abs.h strm/base.h \
+    strm/dgram.h strm/peer.h strm/sflow.h strm/proto.h
 HEADERS +=	sock.h key.h dh.h ident.h flow.h \
-		stream.h strm/abs.h strm/base.h strm/dgram.h \
-		strm/peer.h strm/sflow.h strm/proto.h \
-		reg.h regcli.h \
+		stream.h reg.h regcli.h \
 		sign.h dsa.h rsa.h aes.h sha2.h hmac.h chk32.h \
 		xdr.h util.h timer.h host.h \
 		os.h
+
+HEADERS += $$STRM_HEADERS
 
 SOURCES +=	sock.cc key.cc dh.cc ident.cc flow.cc \
 		stream.cc strm/abs.cc strm/base.cc strm/dgram.cc \
@@ -56,9 +58,10 @@ unix {
 	SOURCES += os-unix.cc
 }
 
+target.path = $$LIBDIR
+headers.path = $$INCDIR/sst
+headers.files = $$HEADERS
+strm_headers.path = $$INCDIR/sst/strm
+strm_headers.files = $$STRM_HEADERS
 
-# Installation
-libsst.path = $$LIBDIR
-libsst.commands = install -c ../libsst.a $$INSTALL_ROOT$$LIBDIR/
-INSTALLS += libsst
-
+INSTALLS += target headers strm_headers

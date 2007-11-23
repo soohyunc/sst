@@ -5,13 +5,13 @@
 
 INCLUDEPATH += @INCS@
 LIBS += @LIBS@
+LIBTYPE = @LIBTYPE@
 
 # Install directories
 BINDIR = @BINDIR@
 LIBDIR = @LIBDIR@
 INCDIR = @INCDIR@
 ETCDIR = @ETCDIR@
-
 
 # SST currently has some code that violates the new strict aliasing rules,
 # which I really don't feel like fixing.  (Type punning is very handy!)

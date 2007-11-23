@@ -11,7 +11,7 @@ DEPENDPATH += . ../lib
 INCLUDEPATH += . ../lib
 QT = core network
 LIBS += -L.. -lsst -lcrypto
-POST_TARGETDEPS += ../libsst.a
+POST_TARGETDEPS += ../libsst.*
 CONFIG -= app_bundle
 
 # Input

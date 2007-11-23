@@ -29,6 +29,17 @@ ETCDIR=$sysconfdir
 test "x$ETCDIR" = 'x${prefix}/etc' && ETCDIR=$PREFIX/etc
 AC_SUBST(ETCDIR)
 
+# Add to see which type of library is desired.  Currently static is default.
+LIBTYPE=staticlib
+AC_ARG_ENABLE(shared, 
+              AC_HELP_STRING([--enable-shared], 
+                             [Generate a shared library.]),
+              LIBTYPE=dll)
+AC_ARG_ENABLE(static,
+              AC_HELP_STRING([--enable-static], 
+                             [Generate a shared library (default).]),
+              LIBTYPE=staticlib)
+AC_SUBST(LIBTYPE)
 
 # Check for required Qt 4 framework
 AC_ARG_WITH(qt, AC_HELP_STRING([--with-qt=DIR],
