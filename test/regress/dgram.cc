@@ -22,13 +22,16 @@ static const int maxDgramSize = 1 << maxDgramP2;
 
 
 DatagramTest::DatagramTest()
-:	clihost(&sim, cliaddr),
-	srvhost(&sim, srvaddr),
+:	clihost(&sim),
+	srvhost(&sim),
 	cli(&clihost),
 	srv(&srvhost),
 	srvs(NULL),
 	narrived(0)
 {
+	clihost.attach(cliaddr, &link);
+	srvhost.attach(srvaddr, &link);
+
 	connect(&srv, SIGNAL(newConnection()),
 		this, SLOT(gotConnection()));
 	if (!srv.listen("regress", "SST regression test server",

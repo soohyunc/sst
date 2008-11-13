@@ -65,7 +65,7 @@ private:
 	Host *host;
 	QHostAddress srvaddr;
 	int srvport;
-	Simulator *sim;
+	SimLink *link;
 
 	QComboBox *priobox;
 	QLabel *speedlabel;
@@ -80,7 +80,7 @@ private:
 
 public:
 	WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
-			Simulator *sim = NULL);
+			SimLink *link = NULL);
 
 private:
 	void sendRequest(int img);

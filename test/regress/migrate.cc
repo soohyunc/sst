@@ -17,8 +17,8 @@ using namespace SST;
 
 
 MigrateTest::MigrateTest()
-:	clihost(&sim, cliaddr),
-	srvhost(&sim, srvaddr),
+:	clihost(&sim),
+	srvhost(&sim),
 	cli(&clihost),
 	srv(&srvhost),
 	srvs(NULL),
@@ -26,6 +26,10 @@ MigrateTest::MigrateTest()
 	narrived(0),
 	nmigrates(0)
 {
+	curaddr = cliaddr;
+	clihost.attach(cliaddr, &link);
+	srvhost.attach(srvaddr, &link);
+
 	starttime = clihost.currentTime();
 	connect(&migrater, SIGNAL(timeout(bool)), this, SLOT(gotTimeout()));
 
@@ -99,14 +103,16 @@ void MigrateTest::gotMessage()
 void MigrateTest::gotTimeout()
 {
 	// Find the next IP address to migrate to
-	quint32 newip = clihost.hostAddress().toIPv4Address() + 1;
-	if (newip == srvhost.hostAddress().toIPv4Address())
+	quint32 newip = curaddr.toIPv4Address() + 1;
+	if (newip == srvaddr.toIPv4Address())
 		newip++;	// don't use same addr as server!
 	QHostAddress newaddr = QHostAddress(newip);
 
 	// Migrate!
 	qDebug() << "migrating to" << newaddr;
-	clihost.setHostAddress(newaddr);
+	clihost.detach(curaddr, &link);
+	clihost.attach(newaddr, &link);
+	curaddr = newaddr;
 	srvs->connectAt(Endpoint(newaddr, NETSTERIA_DEFAULT_PORT));
 
 	// Start the next cycle...

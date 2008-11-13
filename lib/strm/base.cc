@@ -806,7 +806,7 @@ void BaseStream::endflight(const Packet &pkt)
 		//qDebug() << this << "endflight" << pkt.tsn
 		//	<< "bytes in flight" << tflt;
 	}
-	Q_ASSERT(tflt >= 0);
+	// XXX Q_ASSERT(tflt >= 0);
 }
 
 // Main packet receive entrypoint, called from StreamFlow::flowReceive()

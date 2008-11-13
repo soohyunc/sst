@@ -80,20 +80,22 @@ void SimTimerEngine::stop()
 
 ////////// SimPacket //////////
 
-SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
+SimPacket::SimPacket(SimHost *srch, const Endpoint &src, 
+			SimLink *lnk, const Endpoint &dst,
 			const char *data, int size)
 :	QObject(srch->sim),
 	sim(srch->sim),
-	src(src), dst(dst),
+	src(src), dst(dst), dsth(NULL),
 	buf(data, size), timer(srch, this)
 {
-	Q_ASSERT(srch->addr == src.addr);
+	Q_ASSERT(srch->links.value(src.addr) == lnk);
 
-	// Make sure the destination host exists - drop it otherwise
-	SimHost *dsth = sim->hosts.value(dst.addr);
+	// Find the destination on the appropriate incident link;
+	// drop the packet if destination host not found.
+	dsth = lnk->hosts.value(dst.addr);
 	if (!dsth) {
-		qDebug() << this << "nonexistent target host"
-			<< dst.addr.toString();
+		qDebug() << this << "target host"
+			<< dst.addr.toString() << "not on specified link!";
 		deleteLater();
 		return;
 	}
@@ -103,10 +105,10 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
 	// Compute the amount of wire time this packet takes to transmit,
 	// including some per-packet link/inet overhead
 	qint64 psize = buf.size() + PKTOH;
-	qint64 ptime = psize * 1000000 / sim->netrate;
+	qint64 ptime = psize * 1000000 / lnk->netrate;
 
 	// Nominal arrival time based only on network delay
-	qint64 nomarrival = curusecs + sim->netdelay;
+	qint64 nomarrival = curusecs + lnk->netdelay;
 
 	// Decide when this packet will/would arrive at the destination,
 	// by counting from the minimum ping delay or the last arrival,
@@ -114,8 +116,8 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
 	qint64 arrival = qMax(nomarrival, dsth->arrival) + ptime;
 
 	// If the computed arrival time is too late, drop this packet.
-	qint64 mtutime = 1200 * 1000000 / sim->netrate;
-	bool drop = arrival > nomarrival + (mtutime * sim->netbufmul);
+	qint64 mtutime = 1200 * 1000000 / lnk->netrate;
+	bool drop = arrival > nomarrival + (mtutime * lnk->netbufmul);
 
 	quint32 seqno = ntohl(*(quint32*)buf.data()) & 0xffffff;
 	if (tracepkts)
@@ -134,16 +136,18 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
 	}
 	dsth->arrival = arrival;
 
+	// Add it to the host's receive packet queue
+	dsth->pqueue.append(this);
+
 	connect(&timer, SIGNAL(timeout(bool)), this, SLOT(arrive()));
 	timer.start(dsth->arrival - curusecs);
 }
 
 void SimPacket::arrive()
 {
-	// Make sure the destination host still exists - drop it otherwise
-	SimHost *dsth = sim->hosts.value(dst.addr);
-	if (!dsth) {
-		qDebug() << this << "target host disappeared"
+	// Make sure we're still on the destination host's queue
+	if (!dsth || !dsth->pqueue.contains(this)) {
+		qDebug() << this << "no longer queued to destination host"
 			<< dst.addr.toString();
 		return deleteLater();
 	}
@@ -166,10 +170,20 @@ void SimPacket::arrive()
 		return deleteLater();
 	}
 
+	// Remove this packet from the destination host's queue
+	dsth->pqueue.removeAll(this);
+	dsth = NULL;
+
 	SocketEndpoint sep(src, dsts);
 	dsts->receive(buf, sep);
 
 	deleteLater();
+}
+
+SimPacket::~SimPacket()
+{
+	if (dsth)
+		dsth->pqueue.removeAll(this);
 }
 
 
@@ -224,8 +238,20 @@ bool SimSocket::send(const Endpoint &dst, const char *data, int size)
 {
 	Q_ASSERT(port);
 
-	Endpoint src(host->addr, port);
-	(void)new SimPacket(host, src, dst, data, size);
+	// Find the neighbor host and link given the destination address
+	Endpoint src;
+	src.port = port;
+	SimHost *dsth = host->neighborAt(dst.addr, src.addr);
+	if (!dsth) {
+		qDebug() << this << "unknown or un-adjacent target host"
+			<< dst.addr.toString();
+		return false;
+	}
+
+	SimLink *link = host->linkAt(src.addr);
+	Q_ASSERT(link);
+
+	(void)new SimPacket(host, src, link, dst, data, size);
 	return true;
 }
 
@@ -234,7 +260,9 @@ QList<Endpoint> SimSocket::localEndpoints()
 	Q_ASSERT(port);
 
 	QList<Endpoint> l;
-	l.append(Endpoint(host->addr, port));
+	foreach (const QHostAddress &addr, host->links.keys()) {
+		l.append(Endpoint(addr, port));
+	}
 	return l;
 }
 
@@ -251,12 +279,9 @@ QString SimSocket::errorString()
 
 ////////// SimHost //////////
 
-SimHost::SimHost(Simulator *sim, const QHostAddress &addr)
-:	sim(sim), addr(addr), arrival(0)
+SimHost::SimHost(Simulator *sim)
+:	sim(sim), arrival(0)
 {
-	Q_ASSERT(!sim->hosts.contains(addr));
-	sim->hosts.insert(addr, this);
-
 	initSocket(NULL);
 
 	// expensive, and can be done lazily if we need a cryptographic ID...
@@ -269,9 +294,18 @@ SimHost::~SimHost()
 	foreach (quint16 port, socks.keys())
 		socks[port]->unbind();
 
-	// De-register this host from the simulator
-	Q_ASSERT(sim->hosts.value(addr) == this);
-	sim->hosts.remove(addr);
+	// Detach this host from all network links
+	foreach (const QHostAddress addr, links.keys()) {
+		detach(addr, links.value(addr));
+	}
+	Q_ASSERT(links.empty());
+
+	// Detach and delete all packets queued to this host
+	foreach (SimPacket *pkt, pqueue) {
+		Q_ASSERT(pkt->dsth == this);
+		pkt->dsth = NULL;
+		pkt->deleteLater();
+	}
 }
 
 Time SimHost::currentTime()
@@ -291,25 +325,65 @@ Socket *SimHost::newSocket(QObject *parent)
 	return new SimSocket(this, parent);
 }
 
-void SimHost::setHostAddress(const QHostAddress &newaddr)
+void SimHost::attach(const QHostAddress &addr, SimLink *link)
 {
-	Q_ASSERT(sim->hosts.value(addr) == this);
-	sim->hosts.remove(addr);
+	Q_ASSERT(!links.contains(addr));
+	Q_ASSERT(!link->hosts.contains(addr));
 
-	Q_ASSERT(!sim->hosts.contains(newaddr));
-	sim->hosts.insert(newaddr, this);
-
-	addr = newaddr;
+	links.insert(addr, link);
+	link->hosts.insert(addr, this);
 }
 
+void SimHost::detach(const QHostAddress &addr, SimLink *link)
+{
+	Q_ASSERT(link);
+	Q_ASSERT(links.value(addr) == link);
+	Q_ASSERT(link->hosts.value(addr) == this);
+
+	links.remove(addr);
+	link->hosts.remove(addr);
+}
+
+SimHost *SimHost::neighborAt(const QHostAddress &dstaddr, QHostAddress &srcaddr)
+{
+	QHashIterator<QHostAddress, SimLink*> i(links);
+	while (i.hasNext()) {
+		i.next();
+		SimLink *l = i.value();
+		SimHost *h = l->hosts.value(dstaddr);
+		if (h) {
+			srcaddr = i.key();
+			return h;
+		}
+	}
+	return NULL;	// not found
+}
+
+
+////////// SimLink //////////
+
+SimLink::SimLink(LinkPreset preset)
+{
+	netbufmul = 10;	// XXX ???
+
+	switch (preset) {
+	default:
+		Q_ASSERT(0);
+	case Eth100:
+		netrate = 100000/8;
+		netdelay = 1000/2;
+		break;
+	case Eth1000:
+		netrate = 100000/8;
+		netdelay = 650/2;
+		break;
+	}
+}
 
 ////////// Simulator //////////
 
 Simulator::Simulator(bool realtime)
-:	realtime(realtime),
-	netrate(1500000/8),
-	netdelay(55000/2),
-	netbufmul(10)
+:	realtime(realtime)
 {
 	cur.usecs = 0;
 }

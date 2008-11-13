@@ -31,13 +31,16 @@ void usage(const char *appname)
 
 void simulate()
 {
-	Simulator sim;
-
 	QHostAddress cliaddr("1.2.3.4");
 	QHostAddress srvaddr("4.3.2.1");
 
-	SimHost clihost(&sim, cliaddr);
-	SimHost srvhost(&sim, srvaddr);
+	Simulator sim;
+	SimLink link;
+	SimHost clihost(&sim);
+	SimHost srvhost(&sim);
+
+	clihost.attach(cliaddr, &link);
+	srvhost.attach(srvaddr, &link);
 
 	TestClient cli(&clihost, srvaddr, NETSTERIA_DEFAULT_PORT);
 	TestServer srv(&srvhost, NETSTERIA_DEFAULT_PORT);

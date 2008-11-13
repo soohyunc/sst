@@ -18,11 +18,13 @@ class MigrateTest : public QObject
 
 private:
 	Simulator sim;
+	SimLink link;
 	SimHost clihost;
 	SimHost srvhost;
 	Stream cli;
 	StreamServer srv;
 	Stream *srvs;
+	QHostAddress curaddr;
 
 	Time starttime;
 	quint64 timeperiod;

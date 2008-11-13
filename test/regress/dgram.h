@@ -18,6 +18,7 @@ class DatagramTest : public QObject
 
 private:
 	Simulator sim;
+	SimLink link;
 	SimHost clihost;
 	SimHost srvhost;
 	Stream cli;

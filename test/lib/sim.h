@@ -10,6 +10,7 @@
 namespace SST {
 
 class SimHost;
+class SimLink;
 class Simulator;
 
 class SimTimerEngine : public TimerEngine
@@ -31,17 +32,21 @@ protected:
 
 class SimPacket : public QObject
 {
+	friend class SimHost;
 	Q_OBJECT
 
 private:
 	Simulator *sim;
 	Endpoint src, dst;
+	SimHost *dsth;
 	QByteArray buf;
 	Timer timer;
 
 public:
-	SimPacket(SimHost *srch, const Endpoint &src, const Endpoint &dst,
+	SimPacket(SimHost *srch, const Endpoint &src, 
+			SimLink *link, const Endpoint &dst,
 			const char *data, int size);
+	~SimPacket();
 
 private slots:
 	void arrive();
@@ -80,16 +85,21 @@ class SimHost : public Host
 
 private:
 	Simulator *sim;
-	QHostAddress addr;
+
+	// Virtual network links to which this host is attached
+	QHash<QHostAddress, SimLink*> links;
 
 	// Sockets bound on this host
 	QHash<quint16, SimSocket*> socks;
+
+	// Queue of packets to be delivered to this host
+	QList<SimPacket*> pqueue;
 
 	// Minimum network arrival time for next packet to be received
 	qint64 arrival;
 
 public:
-	SimHost(Simulator *sim, const QHostAddress &addr);
+	SimHost(Simulator *sim);
 	~SimHost();
 
 	virtual Time currentTime();
@@ -98,12 +108,63 @@ public:
 	virtual Socket *newSocket(QObject *parent = NULL);
 
 
-	// Return this simulated host's current IP address.
-	inline QHostAddress hostAddress() const { return addr; }
+	// Return this simulated host's current set of IP addresses.
+	inline QList<QHostAddress> hostAddresses() const {
+		return links.keys(); }
 
-	// Dynamically change this host's IP address,
-	// e.g., to simulate host mobility.
-	void setHostAddress(const QHostAddress &newaddr);
+	// Return the currently attached link at a particular address,
+	// NULL if no link attached at that address.
+	inline SimLink *linkAt(const QHostAddress &addr) {
+		return links.value(addr); }
+
+	// Find a neighbor host on some adjacent link
+	// by the host's IP address on that link.
+	// Returns the host pointer, or NULL if not found.
+	// If found, also sets srcaddr to this host's address
+	// on the network link on which the neighbor is found.
+	SimHost *neighborAt(const QHostAddress &dstaddr, QHostAddress &srcaddr);
+
+	// Attach to a network link at a given IP address.
+	// Note that a host may be attached to the same link
+	// at more than one address.
+	void attach(const QHostAddress &addr, SimLink *link);
+
+	// Detach from a network link at a given IP address.
+	void detach(const QHostAddress &addr, SimLink *link);
+};
+
+class SimLink
+{
+	friend class SimHost;
+	friend class SimPacket;
+
+private:
+	Simulator *sim;
+
+	// Hosts attached to this link
+	QHash<QHostAddress, SimHost*> hosts;
+
+	// Network performance settings
+	int netrate;		// Link bandwidth in bytes per second
+	int netdelay;		// Link delay in microseconds one-way
+	int netbufmul;		// Delay multiplier representing net buffering
+
+public:
+
+	enum LinkPreset {
+		Eth100,		// 100Mbps Ethernet link
+		Eth1000,	// 1000Mbps Ethernet link
+	};
+
+	SimLink(LinkPreset preset = Eth1000);
+
+	inline int netRate() const { return netrate; }
+	inline int netDelay() const { return netdelay; }
+	inline int netBufferMultiplier() const { return netbufmul; }
+
+	void setNetRate(int rate) { netrate = rate; }
+	void setNetDelay(int delay) { netdelay = delay; }
+	void setNetBufferMultiplier(int bufmul) { netbufmul = bufmul; }
 };
 
 class Simulator : public QObject
@@ -125,26 +186,13 @@ private:
 	QQueue<SimTimerEngine*> timers;
 
 	// Table of all hosts in the simulation
-	QHash<QHostAddress, SimHost*> hosts;
-
-	// Network performance settings
-	int netrate;		// Link bandwidth in bytes per second
-	int netdelay;		// Link delay in microseconds one-way
-	int netbufmul;		// Delay multiplier representing net buffering
+	//QHash<QHostAddress, SimHost*> hosts;
 
 public:
 	Simulator(bool realtime = false);
 	virtual ~Simulator();
 
 	Time currentTime();
-
-	inline int netRate() const { return netrate; }
-	inline int netDelay() const { return netdelay; }
-	inline int netBufferMultiplier() const { return netbufmul; }
-
-	void setNetRate(int rate) { netrate = rate; }
-	void setNetDelay(int delay) { netdelay = delay; }
-	void setNetBufferMultiplier(int bufmul) { netbufmul = bufmul; }
 
 	void run();
 };

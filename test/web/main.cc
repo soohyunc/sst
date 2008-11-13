@@ -60,12 +60,15 @@ int sim(const QApplication &app)
 	QHostAddress srvaddr("4.3.2.1");
 
 	Simulator sim(true);
-	SimHost clihost(&sim, cliaddr);
-	SimHost srvhost(&sim, srvaddr);
+	SimLink link;
+	SimHost clihost(&sim);
+	SimHost srvhost(&sim);
+	clihost.attach(cliaddr, &link);
+	srvhost.attach(srvaddr, &link);
 
 	WebServer srv(&srvhost, defaultPort);
 
-	WebClient cli(&clihost, srvaddr, defaultPort, &sim);
+	WebClient cli(&clihost, srvaddr, defaultPort, &link);
 	cli.show();
 
 	return app.exec();

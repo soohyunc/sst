@@ -37,8 +37,8 @@ void WebView::mouseMoveEvent(QMouseEvent *ev)
 ////////// WebClient //////////
 
 WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
-			Simulator *sim)
-:	host(host), srvaddr(srvaddr), srvport(srvport), sim(sim),
+			SimLink *link)
+:	host(host), srvaddr(srvaddr), srvport(srvport), link(link),
 	refresher(host)
 {
 	resize(1000, 700);
@@ -58,7 +58,7 @@ WebClient::WebClient(Host *host, const QHostAddress &srvaddr, int srvport,
 		this, SLOT(prioboxChanged(int)));
 
 	// We only get a speed-throttle control on the simulated network.
-	if (sim) {
+	if (link) {
 		QSlider *speedslider = new QSlider(this);
 		speedslider->setMinimum(10);	// 2^10 = 1024 bytes per sec
 		speedslider->setMaximum(30);	// 2^30 = 1 GByte per sec
@@ -383,7 +383,7 @@ void WebClient::speedSliderChanged(int value)
 
 	qDebug() << "change network bandwidth:" << bw;
 
-	sim->setNetRate(bw);
+	link->setNetRate(bw);
 
 	QString str;
 	if (value >= 30)

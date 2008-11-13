@@ -177,8 +177,11 @@ void BasicClient::reqDone()
 void BasicClient::run()
 {
 	Simulator sim;
-	SimHost clihost(&sim, cliaddr);
-	SimHost srvhost(&sim, srvaddr);
+	SimLink link;
+	SimHost clihost(&sim);
+	SimHost srvhost(&sim);
+	clihost.attach(cliaddr, &link);
+	srvhost.attach(srvaddr, &link);
 	BasicClient cli(&clihost, Endpoint(srvaddr, NETSTERIA_DEFAULT_PORT));
 	TestServer srv(&srvhost, NETSTERIA_DEFAULT_PORT);
 	sim.run();
