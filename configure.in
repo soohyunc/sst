@@ -77,7 +77,7 @@ if test -z "$QMAKE"; then
 fi
 if test `uname` = "Darwin"; then
 	# Arrgh, qmake on mac now defaults to assuming an xcode build...
-	QMAKE="$QMAKE -spec darwin-g++"
+	QMAKE="$QMAKE -spec macx-g++"
 fi
 $QMAKE || exit 1
 
