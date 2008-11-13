@@ -75,6 +75,10 @@ if test -z "$QMAKE"; then
 		Please specify its location via '--with-qt=DIR',
 		or see http://www.trolltech.com/ to obtain it.])
 fi
+if test `uname` = "Darwin"; then
+	# Arrgh, qmake on mac now defaults to assuming an xcode build...
+	QMAKE="$QMAKE -spec darwin-g++"
+fi
 $QMAKE || exit 1
 
 # Check for OpenSSL crypto library
