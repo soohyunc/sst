@@ -15,6 +15,7 @@ typedef KeyOptionUnion ?KeyOption;
 
 // Checksum negotiation chunks
 struct KeyChunkChkI1Data {
+	// XXX nonces should be 64-bit, to ensure USIDs unique over all time!
 	unsigned int	cki;		// Initiator's checksum key
 	unsigned char	chani;		// Initiator's channel number
 	opaque		cookie<>;	// Responder's cookie, if any
