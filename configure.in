@@ -29,6 +29,14 @@ ETCDIR=$sysconfdir
 test "x$ETCDIR" = 'x${prefix}/etc' && ETCDIR=$PREFIX/etc
 AC_SUBST(ETCDIR)
 
+# Compile in debug mode if appropriate
+QCONFIG=debug
+AC_ARG_ENABLE(release,
+		AC_HELP_STRING([--enable-release],
+				[Build in release mode (non-debugging).]),
+		QCONFIG=release)
+AC_SUBST(QCONFIG)
+
 # Add to see which type of library is desired.  Currently static is default.
 LIBTYPE=staticlib
 AC_ARG_ENABLE(shared, 
