@@ -864,7 +864,7 @@ bool BaseStream::rxInitPacket(quint64 pktseq, QByteArray &pkt, StreamFlow *flow)
 		// The parent SID is in error, so reset that SID.
 		// Ack the pktseq first so peer won't ignore the reset!
 		qDebug("rxInitPacket: unknown parent stream ID");
-		flow->received(pktseq, false);
+		flow->acknowledge(pktseq, false);
 		txReset(flow, psid, resetDirFlag);
 		return false;
 	}
@@ -903,7 +903,7 @@ BaseStream *BaseStream::rxSubstream(
 		// Ack the pktseq first so peer won't ignore the reset!
 		qDebug("rxInitPacket: other side trying to create substream, "
 			"but we're not listening.");
-		flow->received(pktseq, false);
+		flow->acknowledge(pktseq, false);
 		txReset(flow, sid, resetDirFlag);
 		return NULL;
 	}
@@ -911,7 +911,7 @@ BaseStream *BaseStream::rxSubstream(
 	// Mark the Init packet received now, before transmitting the Reply;
 	// otherwise the Reply won't acknowledge the Init
 	// and the peer will reject it as a stale packet.
-	flow->received(pktseq, true);
+	flow->acknowledge(pktseq, true);
 
 	// Create the child stream.
 	BaseStream *nbs = new BaseStream(flow->host(), peerid, this);
@@ -977,7 +977,7 @@ bool BaseStream::rxReplyPacket(quint64 pktseq, QByteArray &pkt,
 		// Respond with a reset indicating that SID in our space.
 		// Ack the pktseq first so peer won't ignore the reset!
 		qDebug("rxReplyPacket: unknown reference stream ID");
-		flow->received(pktseq, false);
+		flow->acknowledge(pktseq, false);
 		txReset(flow, rsid, 0);
 		return false;
 	}
@@ -1017,7 +1017,7 @@ bool BaseStream::rxDataPacket(quint64 pktseq, QByteArray &pkt, StreamFlow *flow)
 		// Respond with a reset for the unknown stream ID.
 		// Ack the pktseq first so peer won't ignore the reset!
 		qDebug("rxDataPacket: unknown stream ID");
-		flow->received(pktseq, false);
+		flow->acknowledge(pktseq, false);
 		txReset(flow, sid, resetDirFlag);
 		return false;
 	}
@@ -1231,7 +1231,7 @@ bool BaseStream::rxDatagramPacket(quint64 pktseq, QByteArray &pkt,
 		// Ack the pktseq first so peer won't ignore the reset!
 		resetsid:
 		qDebug("rxDatagramPacket: unknown stream ID");
-		flow->received(pktseq, false);
+		flow->acknowledge(pktseq, false);
 		txReset(flow, sid, resetDirFlag);
 		return false;
 	}
@@ -1274,7 +1274,7 @@ bool BaseStream::rxAckPacket(quint64 pktseq, QByteArray &pkt,
 
 	// Count this explicit ack packet as received,
 	// but do NOT send another ack just to ack this ack!
-	flow->received(pktseq, false);
+	flow->acknowledge(pktseq, false);
 
 	// Decode the packet header
 	StreamHeader *hdr = (StreamHeader*)(pkt.data() + Flow::hdrlen);
@@ -1379,7 +1379,7 @@ bool BaseStream::rxAttachPacket(quint64 pktseq, QByteArray &pkt,
 
 	// No way to attach the stream - just reset it.
 	qDebug() << "rxAttachPacket: unknown stream" << usid;
-	flow->received(pktseq, false);
+	flow->acknowledge(pktseq, false);
 	txReset(flow, sid, resetDirFlag);
 	return false;
 }

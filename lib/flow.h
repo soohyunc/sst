@@ -132,7 +132,7 @@ public:
 
 protected:
 
-	// Size of rxmask and txackmask fields in bits
+	// Size of rxmask, rxackmask, and txackmask fields in bits
 	static const int maskBits = 32;
 
 	// Transmit state
@@ -170,12 +170,14 @@ protected:
 	LinkStatus linkstat;	// Current link status
 
 	// Receive state
-	quint64 rxseq;		// Last sequence number received
-	quint32 rxmask;		// Mask of packets recently received
-	quint8 rxackct;		// # contiguous packets received before rxseq
-	quint8 rxunacked;	// # contiguous packets not yet ACKed
+	quint64 rxseq;		// Highest sequence number received so far
+	quint32 rxmask;		// Mask of packets received so far
 
-	// Delayed ACK state
+	// Receive-side ACK state
+	quint64 rxackseq;	// Highest sequence number acknowledged so far
+	//quint32 rxackmask;	// Mask of packets received & acknowledged
+	quint8 rxackct;		// # contiguous packets received before rxackseq
+	quint8 rxunacked;	// # contiguous packets not yet ACKed
 	bool delayack;		// Enable delayed acknowledgments
 	Timer acktimer;		// Delayed ACK timer
 
@@ -232,7 +234,7 @@ public:
 	// so that subsequently transmitted packets include this ack info.
 	// if 'sendack' is true, make sure an acknowledgment gets sent soon:
 	// in the next transmitted packet, or in an ack packet if needed.
-	void received(quint16 pktseq, bool sendack);
+	void acknowledge(quint16 pktseq, bool sendack);
 
 	inline bool deleyedAcks() const { return delayack; }
 	inline void setDelayedAcks(bool enabled) { delayack = enabled; }
@@ -254,7 +256,7 @@ protected:
 				quint64 ackseq, unsigned ackct);
 
 	virtual void readyTransmit();
-	virtual void acked(quint64 txseq, int npackets, quint64 rxseq);
+	virtual void acked(quint64 txseq, int npackets, quint64 rxackseq);
 	virtual void missed(quint64 txseq, int npackets);
 	virtual void expire(quint64 txseq, int npackets);
 
@@ -268,7 +270,7 @@ private:
 	inline bool txack(quint64 ackseq, unsigned ackct)
 		{ QByteArray pkt; return transmitAck(pkt, ackseq, ackct); }
 	inline void flushack()
-		{ if (rxunacked) { rxunacked = 0; txack(rxseq, rxackct); }
+		{ if (rxunacked) { rxunacked = 0; txack(rxackseq, rxackct); }
 		  acktimer.stop(); }
 
 	inline void rtxstart()

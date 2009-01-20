@@ -86,9 +86,13 @@ Flow::Flow(Host *host, QObject *parent)
 	connect(&acktimer, SIGNAL(timeout(bool)),
 		this, SLOT(ackTimeout()));
 
-	// Initialize receive congestion control state
+	// Initialize receive sequencing/replay protection state
 	rxseq = 0;
 	rxmask = 1;	// Ficticious packet 0
+
+	// Initialize receive acknowledgment/congestion control state
+	rxackseq = 0;
+	//rxackmask = 1;	// Ficticious packet 0
 	rxackct = 0;
 	rxunacked = 0;
 
@@ -192,8 +196,8 @@ bool Flow::flowTransmit(QByteArray &pkt, quint64 &pktseq)
 	// Record the fact that this is "real data" for which we want an ACK.
 	txdatseq = txseq;
 
-	// Include implicit acknowledgment of the latest packet(s) we've seen
-	quint32 packseq = (rxackct << ackctShift) | (rxseq & seqMask);
+	// Include implicit acknowledgment of the latest packet(s) we've acked
+	quint32 packseq = (rxackct << ackctShift) | (rxackseq & seqMask);
 	if (rxunacked) {
 		rxunacked = 0;
 		acktimer.stop();
@@ -314,6 +318,20 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 	if (!armr->rxdec(pktseq, pkt)) {
 		qDebug() << this << "receive: auth failed on rx" << pktseq;
 		return;
+	}
+
+	// Record this packet as received for replay protection
+	if (seqdiff > 0) {
+		// Roll rxseq and rxmask forward appropriately.
+		rxseq = pktseq;
+		if (seqdiff < maskBits)
+			rxmask = (rxmask << seqdiff) + 1;
+		else
+			rxmask = 1;	// bit 0 = packet just received
+	} else {
+		// Set appropriate bit in rxmask
+		Q_ASSERT(seqdiff < 0 && seqdiff > -maskBits);
+		rxmask |= (1 << -seqdiff);
 	}
 
 	// Decode the rest of the flow header
@@ -625,7 +643,7 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 	// Pass the received packet to the upper layer for processing.
 	// It'll return true if it wants us to ack the packet, false otherwise.
 	if (flowReceive(pktseq, pkt))
-		received(pktseq, true);
+		acknowledge(pktseq, true);
 		// XX should still replay-protect even if no ack!
 
 	// Signal upper layer that we can transmit more, if appropriate
@@ -633,19 +651,19 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 		readyTransmit();
 }
 
-void Flow::received(quint16 pktseq, bool sendack)
+void Flow::acknowledge(quint16 pktseq, bool sendack)
 {
 	//qDebug() << this << "acknowledging" << pktseq
 	//	<< (sendack ? "(sending)" : "(not sending)");
 
 	// Update our receive state to account for this packet
-	qint32 seqdiff = pktseq - rxseq;
+	qint32 seqdiff = pktseq - rxackseq;
 	if (seqdiff == 1) {
 
 		// Received packet is in-order and contiguous.
-		// Roll rxseq and rxmask forward appropriately.
-		rxseq = pktseq;
-		rxmask = (rxmask << 1) + 1;
+		// Roll rxackseq and rxackmask forward appropriately.
+		rxackseq = pktseq;
+		//rxackmask = (rxackmask << 1) + 1;
 		rxackct++;
 		if (rxackct > ackctMax)
 			rxackct = ackctMax;
@@ -690,12 +708,12 @@ void Flow::received(quint16 pktseq, bool sendack)
 		// before updating our receive state.
 		flushack();
 
-		// Roll rxseq and rxmask forward appropriately.
-		rxseq = pktseq;
-		if (seqdiff < maskBits)
-			rxmask = (rxmask << seqdiff) + 1;
-		else
-			rxmask = 1;	// bit 0 = packet just received
+		// Roll rxackseq and rxackmask forward appropriately.
+		rxackseq = pktseq;
+		//if (seqdiff < maskBits)
+		//	rxackmask = (rxackmask << seqdiff) + 1;
+		//else
+		//	rxackmask = 1;	// bit 0 = packet just received
 
 		// Reset the contiguous packet counter
 		rxackct = 0;	// (0 means 1 packet received)
@@ -703,7 +721,7 @@ void Flow::received(quint16 pktseq, bool sendack)
 		// ACK this discontiguous packet immediately
 		// so that the sender is informed of lost packets ASAP.
 		if (sendack)
-			txack(rxseq, 0);
+			txack(rxackseq, 0);
 
 	} else if (seqdiff < 0) {
 
@@ -711,9 +729,9 @@ void Flow::received(quint16 pktseq, bool sendack)
 		// Flush any delayed ACK immediately.
 		flushack();
 
-		// Set appropriate bit in rxmask for replay protection
-		Q_ASSERT(seqdiff < 0 && seqdiff > -maskBits);
-		rxmask |= (1 << -seqdiff);
+		// Set appropriate bit in rxackmask
+		//if (-seqdiff < maskBits)
+		//	rxackmask |= (1 << -seqdiff);
 
 		// ACK this out-of-order packet immediately.
 		if (sendack)
@@ -729,10 +747,10 @@ void Flow::ackTimeout()
 void Flow::statsTimeout()
 {
 	qDebug("Stats: txseq %llu txdatseq %llu 5xackseq %llu "
-		"rxseq %llu "
+		"rxseq %llu rxackseq %llu"
 		"cwnd %d ssthresh %d\n\t"
 		"cumrtt %.3f cumpps %.3f cumloss %.3f",
-		txseq, txdatseq, txackseq, rxseq, cwnd, ssthresh,
+		txseq, txdatseq, txackseq, rxseq, rxackseq, cwnd, ssthresh,
 		cumrtt, cumpps, cumloss);
 }
 

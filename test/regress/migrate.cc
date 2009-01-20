@@ -126,7 +126,7 @@ void MigrateTest::run()
 	MigrateTest test;
 	test.sim.run();
 
-	qDebug() << "Migrate test complete";
+	qDebug() << "Migrate test completed after" << test.nmigrates;
 	success = true;
 	check(test.nmigrates == MAXMIGRS);
 }
