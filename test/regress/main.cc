@@ -16,6 +16,7 @@
 #include "sim.h"
 #include "dgram.h"
 #include "migrate.h"
+#include "seg.h"
 
 using namespace SST;
 
@@ -35,13 +36,15 @@ struct RegressionTest {
 	{BasicClient::run, "basic", "Basic stream-oriented data transfer"},
 	{DatagramTest::run, "dgram", "Best-effort datagram data transfer"},
 	{MigrateTest::run, "migrate", "Endpoint migration test"},
+	{SegTest::run, "seg", "Segmented path test"},
 };
 #define NTESTS ((int)(sizeof(tests)/sizeof(tests[0])))
 
 void usage(const char *appname)
 {
-	fprintf(stderr, "Usage: %s [<testname>]\n"
-			"Tests:\n", appname);
+	fprintf(stderr, "Usage: %s [<testname>]   - to run a specific test\n"
+			"   or: %s all            - to run all tests\n"
+			"Tests:\n", appname, appname);
 	for (int i = 0; i < NTESTS; i++)
 		fprintf(stderr, "  %-10s %s\n", tests[i].name, tests[i].descr);
 	fprintf(stderr, "Runs all tests if invoked without an argument.\n");
@@ -70,9 +73,11 @@ int main(int argc, char **argv)
 {
 	QCoreApplication app(argc, argv);
 
-	if (argc == 1) {
+	if (argc < 2) {
+		usage(argv[0]);
+	} else if (strcasecmp(argv[1], "all") == 0) {
 
-		// Just run all tests in succession.
+		// Run all tests in succession.
 		printf("Running all %d regression tests:\n", NTESTS);
 		int nfail = 0;
 		for (int i = 0; i < NTESTS; i++) {

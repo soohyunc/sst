@@ -44,7 +44,7 @@ Flow::Flow(Host *host, QObject *parent)
 :	SocketFlow(parent),
 	h(host),
 	armr(NULL),
-	cc(NULL),
+	cc(NULL), nocc(false),
 	rtxtimer(host),
 	linkstat(LinkDown),
 	delayack(false), // XXX breaks current brain-damaged flow control
@@ -102,11 +102,25 @@ Flow::Flow(Host *host, QObject *parent)
 	//statstimer.start(5*1000);
 }
 
+Flow::~Flow()
+{
+	//qDebug() << this << "~Flow()";
+
+	if (armr)
+		delete armr;
+	//if (cc)
+	//	delete cc;
+}
+
 void Flow::start(bool initiator)
 {
 	Q_ASSERT(armr);
 
 	SocketFlow::start(initiator);
+
+	// Test whether we actually need congestion control
+	if (isSocketCongestionControlled())
+		nocc = true;
 
 	// We're ready to go!
 	rtxstart();
@@ -124,6 +138,9 @@ void Flow::stop()
 	SocketFlow::stop();
 
 	setLinkStatus(LinkDown);
+
+	// XXX if client: go into TIME-WAIT
+	// XXX then auto-delete self?
 }
 
 inline qint64 Flow::markElapsed()
@@ -220,6 +237,9 @@ bool Flow::flowTransmit(QByteArray &pkt, quint64 &pktseq)
 
 int Flow::mayTransmit()
 {
+	if (nocc)	// socket already provides congestion control
+		return SocketFlow::mayTransmit();
+
 	unsigned onthewire = unackedDataPackets();
 	if (cwnd > onthewire) {
 		return cwnd - onthewire;
@@ -375,7 +395,7 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 			//	txackseq-ackdiff+1, txackseq-newpackets);
 
 			// Notify congestion control
-			switch (ccmode) {
+			if (!nocc) switch (ccmode) {
 			case CC_TCP: 
 			case CC_DELAY:
 			case CC_VEGAS: {
@@ -472,7 +492,7 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 	// Count the total number of acknowledged packets since the last mark.
 	markacks += newpackets;
 
-	switch (ccmode) {
+	if (!nocc) switch (ccmode) {
 	case CC_TCP: 
 	case CC_VEGAS: {
 		// During standard TCP slow start procedure,
@@ -545,7 +565,7 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 		// The new timestamp will be taken when that packet is sent.
 		markseq = txseq;
 
-		switch (ccmode) {
+		if (!nocc) switch (ccmode) {
 		case CC_TCP:
 			// Normal TCP congestion control:
 			// during congestion avoidance,
@@ -754,10 +774,6 @@ void Flow::statsTimeout()
 		cumrtt, cumpps, cumloss);
 }
 
-void Flow::readyTransmit()
-{
-}
-
 void Flow::acked(quint64, int, quint64)
 {
 }
@@ -773,8 +789,9 @@ void Flow::expire(quint64, int)
 
 ////////// ChecksumArmor //////////
 
-ChecksumArmor::ChecksumArmor(uint32_t txkey, uint32_t rxkey)
-:	txkey(txkey), rxkey(rxkey)
+ChecksumArmor::ChecksumArmor(uint32_t txkey, uint32_t rxkey,
+				const QByteArray &armorid)
+:	txkey(txkey), rxkey(rxkey), armorid(armorid)
 {
 }
 
@@ -905,4 +922,5 @@ bool AESArmor::rxdec(qint64 pktseq, QByteArray &pkt)
 
 	return true;
 }
+
 

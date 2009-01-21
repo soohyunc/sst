@@ -380,6 +380,16 @@ SimLink::SimLink(LinkPreset preset)
 	}
 }
 
+SimLink::~SimLink()
+{
+	// Detach this link from all hosts
+	foreach (const QHostAddress addr, hosts.keys()) {
+		hosts.value(addr)->detach(addr, this);
+	}
+	Q_ASSERT(hosts.empty());
+}
+
+
 ////////// Simulator //////////
 
 Simulator::Simulator(bool realtime)

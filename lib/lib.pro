@@ -16,7 +16,7 @@ QMAKE_CXXFLAGS += -fno-strict-aliasing	# XXX
 # Input
 STRM_HEADERS = strm/abs.h strm/base.h \
     strm/dgram.h strm/peer.h strm/sflow.h strm/proto.h
-HEADERS +=	sock.h key.h dh.h ident.h flow.h \
+HEADERS +=	sock.h key.h dh.h ident.h flow.h seg.h \
 		stream.h reg.h regcli.h \
 		sign.h dsa.h rsa.h aes.h sha2.h hmac.h chk32.h \
 		xdr.h util.h timer.h host.h \
@@ -24,7 +24,7 @@ HEADERS +=	sock.h key.h dh.h ident.h flow.h \
 
 HEADERS += $$STRM_HEADERS
 
-SOURCES +=	sock.cc key.cc dh.cc ident.cc flow.cc \
+SOURCES +=	sock.cc key.cc dh.cc ident.cc flow.cc seg.cc \
 		stream.cc strm/abs.cc strm/base.cc strm/dgram.cc \
 		strm/peer.cc strm/sflow.cc strm/proto.cc \
 		reg.cc regcli.cc \

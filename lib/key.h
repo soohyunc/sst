@@ -2,6 +2,7 @@
 #define SST_KEY_H
 
 #include <QHash>
+#include <QMultiHash>
 #include <QPointer>
 
 #include <openssl/dh.h>
@@ -41,6 +42,7 @@ class KeyInitiator;
 class KeyResponder;
 class KeyHostState;
 class DHKey;
+class ChecksumArmor;
 
 class KeyChunkChkI1Data;
 class KeyChunkChkR1Data;
@@ -171,9 +173,14 @@ private slots:
 class KeyResponder : public SocketReceiver
 {
 	friend class KeyInitiator;
+	Q_OBJECT
 
 private:
 	Host *const h;
+
+	// Cache I1 parameters of currently active checksum-armored flows,
+	// for duplicate detection
+	QHash<QByteArray,ChecksumArmor*> chkflows;
 
 public:
 	// Create a KeyResponder and set it listening on a particular Socket
@@ -223,6 +230,9 @@ private:
 	static QByteArray calcDhCookie(DHKey *hk,
 			const QByteArray &nr, const QByteArray &nhi,
 			const Endpoint &src);
+
+private slots:
+	void checksumArmorDestroyed(QObject *obj);
 };
 
 
@@ -240,8 +250,9 @@ private:
 	// Hash table of all currently active KeyInitiator, indexed on nhi
 	QHash<QByteArray, KeyInitiator*> initnhis;
 
-	// Same, indexed on target endpoint
-	QHash<Endpoint, KeyInitiator*> initeps;
+	// Same, indexed on target endpoint, but allows duplicates.
+	// Used for handling R0 packets during hole-punching.
+	QMultiHash<Endpoint, KeyInitiator*> initeps;
 
 public:
 };

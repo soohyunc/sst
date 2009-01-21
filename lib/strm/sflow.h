@@ -94,7 +94,6 @@ private:
 	virtual bool transmitAck(QByteArray &pkt,
 				quint64 ackseq, unsigned ackct);
 
-	virtual void readyTransmit();
 	virtual bool flowReceive(qint64 rxseq, QByteArray &pkt);
 	virtual void acked(quint64 txseq, int npackets, quint64 rxseq);
 	virtual void missed(quint64 txseq, int npackets);
@@ -104,6 +103,7 @@ private:
 	virtual void stop();
 
 private slots:
+	void gotReadyTransmit();
 	void gotLinkStatusChanged(LinkStatus newstatus);
 };
 

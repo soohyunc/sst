@@ -52,7 +52,7 @@ class StreamPeer : public QObject, public StreamProtocol
 
 	// Flows under construction, by target endpoint
 	QSet<Endpoint> addrs;		// Potential locations known
-	QHash<Endpoint,KeyInitiator*> initors;
+	QHash<SocketEndpoint,KeyInitiator*> initors;
 
 	// All existing streams involving this peer.
 	QSet<BaseStream*> allstreams;

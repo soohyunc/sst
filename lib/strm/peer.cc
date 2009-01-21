@@ -72,9 +72,11 @@ void StreamPeer::connectFlow()
 
 	// Initiate key exchange attempts to any already-known endpoints
 	// using each of the network sockets we have available.
-	foreach (Socket *sock, h->activeSockets())
+	foreach (Socket *sock, h->activeSockets()) {
+		//qDebug() << this << "connectFlow: using socket" << sock;
 		foreach (const Endpoint &ep, addrs)
 			initiate(sock, ep);
+	}
 
 	// Keep firing off connection attempts periodically
 	recontimer.start((qint64)connectRetry * 1000000);
@@ -176,14 +178,14 @@ void StreamPeer::initiate(Socket *sock, const Endpoint &ep)
 		return;
 
 	// Don't simultaneously initiate multiple flows to the same endpoint.
-	// XXX should be keyed on sock too
-	if (initors.contains(ep)) {
+	SocketEndpoint sep(ep, sock);
+	if (initors.contains(sep)) {
 		//qDebug() << this << "already attmpting connection to"
 		//	<< ep.toString();
 		return;
 	}
 
-	qDebug() << this << "initiate to" << ep.toString();
+	qDebug() << this << "initiate to" << sep.toString();
 
 	// Make sure our StreamResponder exists
 	// to receive and dispatch incoming key exchange control packets.
@@ -203,7 +205,7 @@ void StreamPeer::initiate(Socket *sock, const Endpoint &ep)
 	// for the duration of the key exchange.
 	KeyInitiator *ini = new KeyInitiator(fl, magic, id);
 	connect(ini, SIGNAL(completed(bool)), this, SLOT(completed(bool)));
-	initors.insert(ep, ini);
+	initors.insert(sep, ini);
 	Q_ASSERT(fl->parent() == ini);
 }
 
@@ -226,9 +228,9 @@ void StreamPeer::completed(bool success)
 	// If the new flow hasn't been reparented by setPrimary(),
 	// then it will be deleted automatically as well
 	// because it is still a child of the KeyInitiator.
-	Endpoint ep = ki->remoteEndpoint();
-	Q_ASSERT(!initors.contains(ep) || initors.value(ep) == ki);
-	initors.remove(ep);
+	SocketEndpoint sep = ki->remoteEndpoint();
+	Q_ASSERT(!initors.contains(sep) || initors.value(sep) == ki);
+	initors.remove(sep);
 	ki->cancel();
 	ki->deleteLater();
 	ki = NULL;
@@ -236,7 +238,7 @@ void StreamPeer::completed(bool success)
 	// If unsuccessful, notify waiting streams.
 	if (!success) {
 		qDebug() << "Connection attempt for ID" << id.toBase64()
-			<< "to" << ep.toString() << "failed";
+			<< "to" << sep.toString() << "failed";
 		if (lookups.isEmpty() && initors.isEmpty())
 			return flowFailed();
 		return;	// There's still hope

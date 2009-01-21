@@ -62,6 +62,14 @@ struct SocketEndpoint : public Endpoint
 	bool send(const char *data, int size) const;
 	inline bool send(const QByteArray &msg) const
 		{ return send(msg.constData(), msg.size()); }
+
+	inline bool operator==(const SocketEndpoint &other) const
+		{ const Endpoint &ep = *this, &oep = other;
+		  return ep == oep && &*sock == &*other.sock; }
+	inline bool operator!=(const SocketEndpoint &other) const
+		{ return !(*this == other); }
+
+	QString toString() const;
 };
 
 
@@ -88,6 +96,7 @@ private:
 public:
 	inline Socket(SocketHostState *host, QObject *parent = NULL)
 		: QObject(parent), h(host), act(false) { }
+	virtual ~Socket();
 
 	/** Determine whether this socket is active.
 	 * Only active sockets are returned by SocketHostState::activeSockets().
@@ -130,12 +139,30 @@ public:
 	virtual QString errorString() = 0;
 
 
+	// Returns true if this socket provides flow/congestion control
+	// when communicating with the specified remote endpoint
+	virtual bool isCongestionControlled(const Endpoint &ep);
+
+	// For flow/congestion-controlled sockets,
+	// returns the number of packets that may be transmitted now
+	// to a particular target endpoint
+	virtual int mayTransmit(const Endpoint &ep);
+
+	virtual QString toString() const;
+
+
 protected:
 
 	/** Implementation subclass calls this method with received packets.
 	 * @param msg the packet received
 	 * @param src the source from which the packet arrived */
 	void receive(QByteArray &msg, const SocketEndpoint &src);
+
+	/** Bind a new SocketFlow to this Socket.
+	 * Called by SocketFlow::bind() to register in the table of flows.
+	 */
+	virtual bool bindFlow(const Endpoint &remoteep, Channel localchan,
+				SocketFlow *flow);
 };
 
 
@@ -228,6 +255,10 @@ public:
 	inline bool isActive() { return active; }
 	inline bool isBound() { return sock != NULL; }
 
+	// Test whether underlying socket is already congestion controlled
+	inline bool isSocketCongestionControlled()
+		{ return sock->isCongestionControlled(remoteep); }
+
 	// Stop flow and unbind from any currently bound remote endpoint.
 	void unbind();
 
@@ -238,8 +269,16 @@ protected:
 
 	virtual void receive(QByteArray &msg, const SocketEndpoint &src);
 
+	// When the underlying socket is already flow/congestion-controlled,
+	// this function returns the number of packets
+	// that flow control says we may transmit now, 0 if none.
+	virtual int mayTransmit();
+
 signals:
 	void received(QByteArray &msg, const SocketEndpoint &src);
+
+	// Signalled when flow/congestion control may allow new transmission
+	void readyTransmit();
 };
 
 
@@ -274,7 +313,6 @@ protected:
 				QObject *parent = NULL)
 		: QObject(parent), h(h), mag(0) { bind(magic); }
 	virtual ~SocketReceiver();
-
 };
 
 
@@ -339,10 +377,18 @@ public:
 	 */
 	Socket *initSocket(QSettings *settings = NULL,
 		int defaultport = NETSTERIA_DEFAULT_PORT);
+
+signals:
+	/** This signal is sent whenever the host's set of
+	 * active sockets changes. */
+	void activeSocketsChanged();
 };
 
 } // namespace SST
 
+
+// Hash function for SocketEndpoint structs
+uint qHash(const SST::SocketEndpoint &ep);
 
 // Hash function for (Endpoint,Channel) tuples
 inline uint qHash(const QPair<SST::Endpoint,SST::Channel> fl)

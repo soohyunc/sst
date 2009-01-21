@@ -226,7 +226,7 @@ void KeyResponder::receive(QByteArray &pkt, XdrStream &,
 
 void KeyResponder::sendR0(const Endpoint &dst)
 {
-	qDebug() << "send R0 to" << dst.toString();
+	qDebug() << this << "send R0 to" << dst.toString();
 	KeyMessage msg;
 	foreach (Socket *sock, h->activeSockets()) {
 		SocketEndpoint sdst(dst, sock);
@@ -236,8 +236,7 @@ void KeyResponder::sendR0(const Endpoint &dst)
 
 void KeyResponder::gotChkI1(KeyChunkChkI1Data &i1, const SocketEndpoint &src)
 {
-	qDebug("got ChkI1 from %s:%d",
-		src.addr.toString().toAscii().data(), src.port);
+	qDebug() << this << "got ChkI1 from" << src.toString();
 
 	if (i1.chani == 0)
 		return;		// Invalid initiator channel number
@@ -247,6 +246,16 @@ void KeyResponder::gotChkI1(KeyChunkChkI1Data &i1, const SocketEndpoint &src)
 	// Create a legacy EID to represent the responder's (weak) identity
 	Ident identi = Ident::fromIpAddress(src.addr, src.port);
 	QByteArray eidi = identi.id();
+
+	// Check for duplicate, already-accepted I1 requests
+	QByteArray armorid = eidi;
+	armorid.append(QByteArray((char*)&i1.cki, sizeof(i1.cki)));
+	armorid.append(QByteArray((char*)&i1.chani, sizeof(i1.chani)));
+	qDebug() << "armorid" << armorid.toHex();
+	if (chkflows.value(armorid) != NULL) {
+		qDebug("Dropping duplicate ChkI1 for already-setup flow");
+		return;
+	}
 
 	// Check that the initiator is someone we want to talk with!
 	if (!checkInitiator(src, eidi, i1.ulpi)) {
@@ -270,8 +279,13 @@ void KeyResponder::gotChkI1(KeyChunkChkI1Data &i1, const SocketEndpoint &src)
 		ckr++;	// Make sure it's different from cki!
 
 	// Should be no failures after this point.
-	ChecksumArmor *armor = new ChecksumArmor(ckr, i1.cki);
+	ChecksumArmor *armor = new ChecksumArmor(ckr, i1.cki, armorid);
 	flow->setArmor(armor);
+
+	// Keep track of active flows to detect duplicates of this ChkI1
+	chkflows.insert(armorid, armor);
+	connect(armor, SIGNAL(destroyed(QObject*)),
+		this, SLOT(checksumArmorDestroyed(QObject*)));
 
 	// Set the channel IDs for the new stream.
 	QByteArray txchanid = calcChkChanId(ckr, i1.cki);
@@ -292,6 +306,15 @@ void KeyResponder::gotChkI1(KeyChunkChkI1Data &i1, const SocketEndpoint &src)
 	// Let the ball roll
 	flow->setRemoteChannel(i1.chani);
 	flow->start(false);
+}
+
+void KeyResponder::checksumArmorDestroyed(QObject *obj)
+{
+	ChecksumArmor *armor = (ChecksumArmor*)obj;
+	qDebug() << this << "checksumArmorDestroyed" << armor;
+
+	int n = chkflows.remove(armor->id());
+	Q_ASSERT(n == 1);
 }
 
 
@@ -586,7 +609,8 @@ KeyInitiator::KeyInitiator(Flow *fl, quint32 magic,
 		h->initnhis.insert(nhi, this);
 	}
 
-	Q_ASSERT(!h->initeps.contains(sepr));
+	// Register us as one of potentially several initiators
+	// attempting to connect to this remote endpoint
 	h->initeps.insert(sepr, this);
 
 	connect(&txtimer, SIGNAL(timeout(bool)),
@@ -615,17 +639,19 @@ KeyInitiator::cancel()
 			h->initnhis.value(nhi) == this)
 		h->initnhis.remove(nhi);
 
-	if (h->initeps.value(sepr) == this)
-		h->initeps.remove(sepr);
+	h->initeps.remove(sepr, this);
 }
 
 void
 KeyInitiator::gotR0(Host *h, const Endpoint &src)
 {
-	KeyInitiator *i = h->initeps.value(src);
-	if (i == NULL || i->state != I1)
-		return;
-	i->sendI1();
+	// Trigger a retransmission of the I1 packet
+	// for each outstanding initiation attempt to the given target.
+	foreach (KeyInitiator *i, h->initeps.values(src)) {
+		if (i == NULL || i->state != I1)
+			return;
+		i->sendI1();
+	}
 }
 
 void
@@ -688,8 +714,7 @@ void
 KeyInitiator::gotChkR1(Host *h, KeyChunkChkR1Data &r1,
 			const SocketEndpoint &src)
 {
-	qDebug("got ChkR1 from %s:%d",
-		src.addr.toString().toAscii().data(), src.port);
+	qDebug() << "got ChkR1 from" << src.toString();
 
 	// Lookup the Initiator based on the received checksum key
 	KeyInitiator *i = h->initchks.value(KeyEpChk(src, r1.cki));

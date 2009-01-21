@@ -109,12 +109,12 @@ void DatagramStream::shutdown(Stream::ShutdownMode mode)
 	}
 }
 
-void DatagramStream::setReceiveBuffer(int size)
+void DatagramStream::setReceiveBuffer(int)
 {
 	// do nothing
 }
 
-void DatagramStream::setChildReceiveBuffer(int size)
+void DatagramStream::setChildReceiveBuffer(int)
 {
 	// do nothing
 }

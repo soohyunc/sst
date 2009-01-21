@@ -157,6 +157,7 @@ public:
 	};
 
 	SimLink(LinkPreset preset = Eth1000);
+	~SimLink();
 
 	inline int netRate() const { return netrate; }
 	inline int netDelay() const { return netdelay; }

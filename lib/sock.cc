@@ -29,8 +29,31 @@ bool SocketEndpoint::send(const char *data, int size) const
 	return sock->send(*this, data, size);
 }
 
+QString SocketEndpoint::toString() const
+{
+	return Endpoint::toString() + " via "
+		+ (sock.isNull() ? "NULL" : sock->toString());
+}
+
+uint qHash(const SST::SocketEndpoint &sep)
+{
+	const Endpoint &ep = sep;
+	Socket *sock = sep.sock;
+	return qHash(ep) + qHash(sock);
+}
+
 
 ////////// Socket //////////
+
+Socket::~Socket()
+{
+	//qDebug() << this << "~Socket()";
+
+	// Unbind all flows
+	foreach (SocketFlow *f, flows.values())
+		f->unbind();
+	Q_ASSERT(flows.isEmpty());
+}
 
 void Socket::setActive(bool newact)
 {
@@ -40,6 +63,18 @@ void Socket::setActive(bool newact)
 		h->actsocks.removeAll(this);
 	}
 	act = newact;
+
+	h->activeSocketsChanged();
+}
+
+bool
+Socket::bindFlow(const Endpoint &remoteep, Channel localchan, SocketFlow *fl)
+{
+	Q_ASSERT(flow(remoteep, localchan) == NULL);
+
+	QPair<Endpoint,Channel> p(remoteep, localchan);
+	flows.insert(p, fl);
+	return true;
 }
 
 void
@@ -69,6 +104,24 @@ Socket::receive(QByteArray &msg, const SocketEndpoint &src)
 
 	qDebug("Received control message for unknown flow/receiver %08x",
 		magic);
+}
+
+bool Socket::isCongestionControlled(const Endpoint &)
+{
+	return false;
+}
+
+int Socket::mayTransmit(const Endpoint &)
+{
+	qFatal("Socket::mayTransmit() called on non-flow-controlled socket");
+	return -1;
+}
+
+QString Socket::toString() const
+{
+	return QString("%1(0x%2)")
+		.arg(metaObject()->className())
+		.arg((ulong)this, 0, 16);
 }
 
 
@@ -184,8 +237,8 @@ Channel SocketFlow::bind(Socket *sock, const Endpoint &dst)
 	}
 
 	// Bind to this channel
-	bool success = bind(sock, dst, chan);
-	Q_ASSERT(success);
+	if (!bind(sock, dst, chan))
+		return 0;
 
 	return chan;
 }
@@ -202,12 +255,13 @@ bool SocketFlow::bind(Socket *sock, const Endpoint &dst, Channel chan)
 	//qDebug() << this << "bind" << dst << "chan" << chan << "to" << sock;
 
 	// Bind us to this socket and channel
-	this->sock = sock;
 	remoteep.addr = dst.addr;
 	remoteep.port = dst.port;
 	localchan = chan;
-	QPair<Endpoint,Channel> p(remoteep, localchan);
-	sock->flows.insert(p, this);
+	if (!sock->bindFlow(remoteep, localchan, this))
+		return false;
+
+	this->sock = sock;
 	return true;
 }
 
@@ -242,6 +296,12 @@ void SocketFlow::unbind()
 void SocketFlow::receive(QByteArray &msg, const SocketEndpoint &src)
 {
 	received(msg, src);
+}
+
+int SocketFlow::mayTransmit()
+{
+	Q_ASSERT(sock);
+	return sock->mayTransmit(remoteep);
 }
 
 

@@ -3,6 +3,7 @@
 
 #include <QTime>
 #include <QTimer>
+#include <QQueue>	// XXX FlowSegment
 
 #include "ident.h"
 #include "sock.h"
@@ -31,9 +32,10 @@ static const PacketSeq maxPacketSeq = ~(PacketSeq)0;
 
 
 // Abstract base class for flow encryption and authentication schemes.
-class FlowArmor
+class FlowArmor : public QObject
 {
 	friend class Flow;
+	Q_OBJECT
 
 protected:
 	// The pseudo-header is a header logically prepended to each packet
@@ -62,6 +64,7 @@ private:
 	Host *const h;
 	FlowArmor *armr;	// Encryption/authentication method
 	FlowCC *cc;		// Congestion control method
+	bool nocc;		// Disable congestion control.  XXX
 
 	// Per-direction unique channel IDs for this channel.
 	// Stream layer uses these in assigning USIDs to new streams.
@@ -103,6 +106,7 @@ public:
 
 
 	Flow(Host *host, QObject *parent = NULL);
+	virtual ~Flow();
 
 	inline Host *host() { return h; }
 
@@ -197,7 +201,7 @@ protected:
 	// The packet is armored in-place in the provided QByteArray.
 	// It is the caller's responsibility to transmit
 	// only when flow control says it's OK (mayTransmit())
-	// or upon getting a readyTransmit() callback.
+	// or upon getting a readyTransmit() signal.
 	// Provides in 'pktseq' the transmit sequence number
 	// that was assigned to the packet.
 	// Returns true if the transmit was successful,
@@ -208,7 +212,7 @@ protected:
 
 	// Check congestion control state and return the number of new packets,
 	// if any, that flow control says we may transmit now.
-	int mayTransmit();
+	virtual int mayTransmit();
 
 	// Compute current number of transmitted but un-acknowledged packets.
 	// This count may include raw ACK packets,
@@ -255,7 +259,6 @@ protected:
 	virtual bool transmitAck(QByteArray &pkt,
 				quint64 ackseq, unsigned ackct);
 
-	virtual void readyTransmit();
 	virtual void acked(quint64 txseq, int npackets, quint64 rxackseq);
 	virtual void missed(quint64 txseq, int npackets);
 	virtual void expire(quint64 txseq, int npackets);
@@ -296,13 +299,17 @@ private slots:
 // who can inject forged packets but not monitor the flow.
 class ChecksumArmor : public FlowArmor
 {
-	const uint32_t txkey, rxkey;
+	const uint32_t txkey, rxkey;	// flow authentication parameters
+	const QByteArray armorid;	// for key protocol duplicate detection
 
 public:
-	ChecksumArmor(uint32_t txkey, uint32_t rxkey);
+	ChecksumArmor(uint32_t txkey, uint32_t rxkey,
+			const QByteArray &armorid = QByteArray());
 
 	virtual QByteArray txenc(qint64 pktseq, const QByteArray &pkt);
 	virtual bool rxdec(qint64 pktseq, QByteArray &pkt);
+
+	inline QByteArray id() { return armorid; }
 };
 
 
@@ -323,6 +330,7 @@ public:
 	virtual QByteArray txenc(qint64 pktseq, const QByteArray &pkt);
 	virtual bool rxdec(qint64 pktseq, QByteArray &pkt);
 };
+
 
 } // namespace SST
 

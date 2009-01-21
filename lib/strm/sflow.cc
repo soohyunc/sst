@@ -35,14 +35,16 @@ StreamFlow::StreamFlow(Host *h, StreamPeer *peer, const QByteArray &peerid)
 
 	//XXX channel IDs
 
+	connect(this, SIGNAL(readyTransmit()),
+		this, SLOT(gotReadyTransmit()));
 	connect(this, SIGNAL(linkStatusChanged(LinkStatus)),
 		this, SLOT(gotLinkStatusChanged(LinkStatus)));
 }
 
 StreamFlow::~StreamFlow()
 {
-	qDebug() << this << "~StreamFlow to" << remoteEndpoint().toString()
-		<< "lchan" << localChannel() << "rchan" << remoteChannel();
+	//qDebug() << this << "~StreamFlow to" << remoteEndpoint().toString()
+	//	<< "lchan" << localChannel() << "rchan" << remoteChannel();
 
 	disconnect(this, SIGNAL(linkStatusChanged(LinkStatus)),
 		this, SLOT(gotLinkStatusChanged(LinkStatus)));
@@ -112,7 +114,7 @@ bool StreamFlow::transmitAck(QByteArray &pkt, quint64 ackseq, unsigned ackct)
 	return Flow::transmitAck(pkt, ackseq, ackct);
 }
 
-void StreamFlow::readyTransmit()
+void StreamFlow::gotReadyTransmit()
 {
 	if (tstreams.isEmpty())
 		return;
