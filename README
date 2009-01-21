@@ -1,0 +1,74 @@
+
+			Structured Stream Transport
+			~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Project home page: http://pdos.csail.mit.edu/uia/sst/
+
+Requirements
+------------
+
+Software package dependencies:		Can be obtained from:
+	- OpenSSL libraries		openssl.org
+	- Qt 4 GUI toolkit		trolltech.com
+
+
+Building and Installing
+-----------------------
+
+To check out from Subversion and set up the configure scripts:
+  svn co svn://svn.pdos.csail.mit.edu/uia/trunk/uia/sst
+  cd sst
+  ./misc/setup
+
+To build and install:
+  ./configure [--prefix=<install-location>]
+  make
+  make install
+
+
+Using SST
+---------
+
+...modes of use...
+
+...event loop integration:
+(a) if your app uses Qt...
+(b) if your app uses glib...  Qt 4.2 contains built-in support
+	for integration with glib's event loop.
+	Make sure Qt was compiled and installed with
+	glib support (the -glib option on the configure line).
+	Qt will then by default use glib's main event loop instead of its own.
+(c) if neither of the above apply, implement a few callback functions...
+
+
+Directory Structure
+~~~~~~~~~~~~~~~~~~~
+
+inc		Public C/C++ header files for SST libraries
+lib		Core SST protocol stack implementation library (libsst)
+c		API wrapper/remote access library for C programs (libsst_c)
+reg		Lightweight standalone registration server for NAT traversal
+doc		Documentation for the SST protocol stack and API wrapper
+rpcgen		Version of Sun rpcgen modified to produce Qt-style XDR stubs
+shell		Simple SST-based remote shell application
+test		Various small test, analysis, and demo programs
+
+
+License
+-------
+
+The core SST protocol stack (libsst) is distributed under the GNU General
+Public License, version 2, which is necessary because this code relies on
+the GPL-licensed Qt 4 toolkit from Trolltech.  See the file COPYING for
+details.  The other SST libraries such as libsst_c, which provide language-
+and environment-specific API wrappers to help applications use SST
+conveniently, are distributed under the MIT open source license.
+
+Because applications can use the API wrapper libraries to interface to an
+SST implementation in either the same or a different process, users who are
+concerned about their application being "contaminated" with GPL code can
+link only the MIT-licensed API wrapper library into their application, and
+run the SST protocol stack in a separate daemon process, so that only the
+SST process and not the application falls under the terms of the GPL.
+
+
