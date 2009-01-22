@@ -50,18 +50,23 @@ private:
 	StreamServer srv;
 	Stream *srvs;
 
+	int sendcnt, recvcnt;
+	qint64 sendtot, recvtot;
+	qint64 delaytot;
+
+	// Bandwidth calculation
+	qint64 recvtotlast, recvtimelast;
+	double recvrate;
+
 public:
 	SegTest();
 
 	static void run();
 
-private:
-	void ping(Stream *strm);
-
 private slots:
-	void gotConnection();
-	void gotData();
-	void gotMessage();
+	void cliReadyWrite();
+	void srvConnection();
+	void srvMessage();
 	void gotEventStep();
 };
 

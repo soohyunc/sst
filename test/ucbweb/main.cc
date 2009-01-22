@@ -58,8 +58,7 @@ void simulate()
 	SimHost clihost(&sim);
 	SimHost srvhost(&sim);
 
-	clihost.attach(cliaddr, &link);
-	srvhost.attach(srvaddr, &link);
+	link.connect(&clihost, cliaddr, &srvhost, srvaddr);
 
 	TestClient cli(&clihost, srvaddr, NETSTERIA_DEFAULT_PORT);
 	TestServer srv(&srvhost, NETSTERIA_DEFAULT_PORT);

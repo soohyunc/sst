@@ -18,8 +18,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 
+#include <QTextStream>
 #include <QtDebug>
 
 #include "flow.h"
@@ -33,6 +35,9 @@ using namespace SST;
 #define FLOW_PORT	NETSTERIA_DEFAULT_PORT
 
 
+QTextStream out(stdout);
+
+
 SegTest::SegTest()
 :	h1(&sim), h2(&sim), h3(&sim), h4(&sim),
 	fs1(&h1, QHostAddress("1.1.34.4")),
@@ -41,7 +46,9 @@ SegTest::SegTest()
 	si1(NULL), sr2(NULL), si2(NULL), sr3(NULL), si3(NULL), sr4(NULL),
 	cli(&h1),
 	srv(&h4),
-	srvs(NULL)
+	srvs(NULL),
+	sendcnt(0), recvcnt(0), sendtot(0), recvtot(0), delaytot(0),
+	recvtotlast(0), recvtimelast(0), recvrate(0)
 {
 	// Gather simulation statistics
 	connect(&sim, SIGNAL(eventStep()), this, SLOT(gotEventStep()));
@@ -54,6 +61,10 @@ SegTest::SegTest()
 	l34.connect(&h3, QHostAddress("1.1.34.3"),
 		    &h4, QHostAddress("1.1.34.4"));
 
+	l23.setPreset(DSL15);
+	//l23.setPreset(Eth10);
+	//l23.setLinkRate(50*1024*1024/8);
+
 	// Set up the flow layer forwarding chain (XXX horrible hack)
 	fr2.forwardTo(Endpoint(QHostAddress("1.1.23.3"), FLOW_PORT));
 	fr3.forwardTo(Endpoint(QHostAddress("1.1.34.4"), FLOW_PORT));
@@ -64,24 +75,34 @@ SegTest::SegTest()
 
 	// Set up the application-level server
 	connect(&srv, SIGNAL(newConnection()),
-		this, SLOT(gotConnection()));
+		this, SLOT(srvConnection()));
 	if (!srv.listen("regress", "SST regression test server",
 			"seg", "Flow segmentation test protocol"))
 		qFatal("Can't listen on service name");
 
 	// Open a connection to the server
-	connect(&cli, SIGNAL(readyRead()), this, SLOT(gotData()));
-	connect(&cli, SIGNAL(readyReadMessage()), this, SLOT(gotMessage()));
+	connect(&cli, SIGNAL(readyWrite()), this, SLOT(cliReadyWrite()));
 	cli.connectTo(h4.hostIdent(), "regress", "seg");
 	cli.connectAt(Endpoint(QHostAddress("1.1.34.4"), NETSTERIA_DEFAULT_PORT));
-
-	// Get the ping-pong process going...
-	ping(&cli);
 }
 
-void SegTest::gotConnection()
+void SegTest::cliReadyWrite()
 {
-	qDebug() << this << "gotConnection";
+	qint64 data[2] = { 0x12345678, sim.currentTime().usecs };
+
+	// Send one MTU-size message at a time
+	QByteArray buf((char*)&data, sizeof(data));
+	buf.resize(StreamProtocol::mtu);	// XXX
+
+	//qDebug() << &cli << "send msg size" << buf.size();
+	cli.writeMessage(buf);
+	sendcnt++;
+	sendtot += buf.size();
+}
+
+void SegTest::srvConnection()
+{
+	qDebug() << this << "srvConnection";
 	Q_ASSERT(srvs == NULL);
 
 	srvs = srv.accept();
@@ -89,62 +110,46 @@ void SegTest::gotConnection()
 
 	srvs->listen(Stream::Unlimited);
 
-	connect(srvs, SIGNAL(readyReadMessage()), this, SLOT(gotMessage()));
+	connect(srvs, SIGNAL(readyReadMessage()), this, SLOT(srvMessage()));
 
 	// All the flows should now exist
 	sr2 = fr2.lastiseg;	si2 = fr2.lastoseg;
 	sr3 = fr3.lastiseg;	si3 = fr3.lastoseg;
 	sr4 = fr4.lastiseg;
+
+	si1->setCCMode(CC_DELAY);
+	si2->setCCMode(CC_DELAY);
+	si3->setCCMode(CC_DELAY);
 }
 
-void SegTest::ping(Stream *strm)
+void SegTest::srvMessage()
 {
-	// Send a random-size message
-	int p2 = 22; 	// lrand48() % 16;
-	QByteArray buf;
-	buf.resize(1 << p2);
-	//qDebug() << strm << "send msg size" << buf.size();
-	strm->writeMessage(buf);
-}
-
-void SegTest::gotData()
-{
-	Stream *strm = (Stream*)QObject::sender();
 	while (true) {
-		QByteArray buf = strm->readData();
-		qDebug() << strm << "recv data size" << buf.size();
-	}
-}
-
-void SegTest::gotMessage()
-{
-	Stream *strm = (Stream*)QObject::sender();
-	while (true) {
-		QByteArray buf = strm->readMessage();
+		QByteArray buf = srvs->readMessage();
 		if (buf.isNull())
 			return;
+		recvcnt++;
+		recvtot += buf.size();
 
-		qDebug() << strm << "recv msg size" << buf.size();
+		qDebug() << srvs << "recv msg size" << buf.size();
 
-#if 0
-		narrived++;
+		Q_ASSERT(buf.size() == StreamProtocol::mtu);	// XXX
+		qint64 *data = (qint64*)buf.data();
+		Q_ASSERT(data[0] == 0x12345678);
 
-		if (narrived == MSGPERIOD) {
-			timeperiod = clihost.currentTime().usecs
-				- starttime.usecs;
-			qDebug() << "migr" << nmigrates << "timeperiod:"
-				<< (double)timeperiod / 1000000.0;
+		qint64 sendtime = data[1];
+		qint64 recvtime = sim.currentTime().usecs;
+		qint64 delay = recvtime - sendtime;
+		delaytot += delay;
+		double avgdelay = delaytot / recvcnt;
 
-			// Wait some random addional time before migrating,
-			// to ensure that migration can happen at
-			// "unexpected moments"...
-			migrater.start(timeperiod * drand48());
-		}
+		//printf("%lld %lld %d\n", sendtime, recvtime, buf.size());
+		out << sendtime/1000000.0 << " " << recvtime/1000000.0 << " "
+			<< delay << " " << avgdelay << " "
+			<< recvtot << " "
+			<< buf.size() << endl;
 
-		// Keep ping-ponging until we're done.
-		if (nmigrates < MAXMIGRS)
-			ping(strm);
-#endif
+		//recvlast = sim.currentTime();
 	}
 }
 
@@ -153,17 +158,42 @@ void SegTest::gotEventStep()
 	if (!si1 || !sr4)
 		return;		// flows not yet setup
 
-	// Initiator-to-responder path
-	qDebug() << sim.currentTime().usecs
-		<< si1->txPacketsInFlight() << "/" << si1->txCongestionWindow()
-		<< si2->txPacketsInFlight() << "/" << si2->txCongestionWindow()
-		<< si3->txPacketsInFlight() << "/" << si3->txCongestionWindow();
+#if 0
+	// Bandwidth monitoring
+	qint64 curtime = sim.currentTime().usecs;
+	if (recvtot > recvtotlast && curtime > recvtimelast) {
+		double instrate = (double)(recvtot - recvtotlast) /
+					((curtime - recvtimelast)/1000000.0);
+		recvrate = (recvrate*99.0 + instrate)/100.0;
 
+		recvtotlast = recvtot;
+		recvtimelast = curtime;
+
+		out << curtime/1000000.0 << " " << recvtot << " "
+			<< instrate << " " << recvrate << " "
+			<< endl;
+	}
+#endif
+
+#if 0
+	// Windows and queues on initiator-to-responder path
+	out << (double)sim.currentTime().usecs/1000000.0 << " "
+		<< sendtot << " " << recvtot << " "
+		<< si1->txPacketsInFlight() << " "
+		<< sr2->rxQueuedPackets() << " "
+		<< si2->txPacketsInFlight() << " "
+		<< sr3->rxQueuedPackets() << " "
+		<< si3->txPacketsInFlight() << " "
+		<< sr4->rxQueuedPackets() << endl;
+#endif
+
+#if 0
 	// Responder-to-initiator path
-	//qDebug() << sim.currentTime().usecs
-	//	<< sr4->txPacketsInFlight() << "/" << sr4->txCongestionWindow()
-	//	<< sr3->txPacketsInFlight() << "/" << sr3->txCongestionWindow()
-	//	<< sr2->txPacketsInFlight() << "/" << sr2->txCongestionWindow();
+	qDebug() << sim.currentTime().usecs
+		<< sr4->txPacketsInFlight() << "/" << sr4->txCongestionWindow()
+		<< sr3->txPacketsInFlight() << "/" << sr3->txCongestionWindow()
+		<< sr2->txPacketsInFlight() << "/" << sr2->txCongestionWindow();
+#endif
 }
 
 void SegTest::run()

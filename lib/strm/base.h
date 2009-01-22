@@ -199,6 +199,7 @@ private:
 	bool		tqflow;			// We're on flow's tx queue
 	QSet<qint32>	twait;			// Segments waiting to be ACKed
 	QQueue<Packet>	tqueue;			// Packets to be transmitted
+	qint32		twaitsize;		// Bytes in twait segments
 
 	// Substream transmit state
 	qint32		tswin;			// Transmit substream window
@@ -350,6 +351,7 @@ public:
 
 	// Implementations of AbstractStream's data I/O methods
 	virtual qint64 bytesAvailable() const { return ravail; }
+	virtual qint64 bytesToWrite() const { return twaitsize; } // XXX dgrams
 	virtual int readData(char *data, int maxSize);
 	virtual int writeData(const char *data, int maxSize,
 				quint8 endflags);

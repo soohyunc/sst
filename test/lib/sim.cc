@@ -480,22 +480,34 @@ SimLink::SimLink(LinkPreset preset)
 	hosts[0] = hosts[1] = NULL;
 	arrival[0] = arrival[1] = 0;
 
-	switch (preset) {
-	default:
-	case DSL15: params[0] = dsl15_dn; params[1] = dsl15_up; break;
-	case Cable5: params[0] = cable5_dn; params[1] = cable5_up; break;
-	case Eth10: params[0] = params[1] = eth10; break;
-	case Eth100: params[0] = params[1] = eth100; break;
-	case Eth1000: params[0] = params[1] = eth1000; break;
-	}
-
-	qDebug() << this << "downlink:" << params[0].toString();
-	qDebug() << this << "uplink:" << params[1].toString();
+	setPreset(preset);
 }
 
 SimLink::~SimLink()
 {
 	disconnect();
+}
+
+void SimLink::setPreset(LinkPreset preset)
+{
+	switch (preset) {
+	case DSL15:	setLinkParams(dsl15_dn, dsl15_up); break;
+	case Cable5:	setLinkParams(cable5_dn, cable5_up); break;
+	case Eth10:	setLinkParams(eth10); break;
+	case Eth100:	setLinkParams(eth100); break;
+	case Eth1000:	setLinkParams(eth1000); break;
+	default:
+		qFatal("SimLink: unknown preset %d", preset);
+	}
+}
+
+void SimLink::setLinkParams(const LinkParams &down, const LinkParams &up)
+{
+	params[0] = down;
+	params[1] = up;
+
+	qDebug() << this << "downlink:" << params[0].toString();
+	qDebug() << this << "uplink:" << params[1].toString();
 }
 
 void SimLink::connect(SimHost *downHost, const QHostAddress &downAddr,

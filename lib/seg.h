@@ -40,7 +40,7 @@ class FlowSegment : public Flow
 	friend class FlowResponder;
 	Q_OBJECT
 
-	static const int qlim_default = 100;	// XX ??
+	static const int qlim_default = 50;	// XX ??
 
 private:
 	FlowSegment *other;	// Seg to which we're joined, if middlebox
@@ -64,6 +64,8 @@ private slots:
 
 public:
 	FlowSegment(Host *host, QObject *parent = NULL);
+
+	inline int rxQueuedPackets() { return rxq.size(); }
 };
 
 

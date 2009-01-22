@@ -402,7 +402,7 @@ void WebClient::speedSliderChanged(int value)
 
 	qDebug() << "change network bandwidth:" << bw;
 
-	link->setNetRate(bw);
+	link->setLinkRate(bw);
 
 	QString str;
 	if (value >= 30)

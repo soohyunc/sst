@@ -82,8 +82,7 @@ int sim(const QApplication &app)
 	SimLink link;
 	SimHost clihost(&sim);
 	SimHost srvhost(&sim);
-	clihost.attach(cliaddr, &link);
-	srvhost.attach(srvaddr, &link);
+	link.connect(&clihost, cliaddr, &srvhost, srvaddr);
 
 	WebServer srv(&srvhost, defaultPort);
 

@@ -103,7 +103,7 @@ BaseStream::BaseStream(Host *h, QByteArray peerid, BaseStream *parent)
 	endread(false),
 	endwrite(false),
 	tcuratt(NULL),
-	tasn(0), twin(0), tflt(0), tqflow(false),
+	tasn(0), twin(0), tflt(0), tqflow(false), twaitsize(0),
 	tswin(0), tsflt(0),
 	rsn(0),
 	ravail(0), rmsgavail(0), rbufused(0),
@@ -425,6 +425,8 @@ void BaseStream::txenqueue(const Packet &pkt)
 
 void BaseStream::txenqflow(bool immed)
 {
+	//qDebug() << this << "txenqflow" << immed;
+
 	// Make sure we're attached to a flow - if not, attach.
 	if (!tcuratt)
 		return tattach();
@@ -432,9 +434,14 @@ void BaseStream::txenqflow(bool immed)
 	Q_ASSERT(flow && flow->isActive());
 
 	// Enqueue this stream to the flow's transmit queue.
-	if (!tqflow && !tqueue.isEmpty()) {
-		flow->enqueueStream(this);
-		tqflow = true;
+	if (!tqflow) {
+		if (tqueue.isEmpty()) {
+			if (strm) // Nothing to transmit - prod application.
+				strm->readyWrite();
+		} else {
+			flow->enqueueStream(this);
+			tqflow = true;
+		}
 	}
 
 	// Prod the flow to transmit immediately if possible
@@ -465,8 +472,11 @@ void BaseStream::transmit(StreamFlow *flow)
 	while (hp->type == DataPacket && !twait.contains(hp->tsn)) {
 		// No longer waiting for this tsn - must have been ACKed.
 		tqueue.removeFirst();
-		if (tqueue.isEmpty())
+		if (tqueue.isEmpty()) {
+			if (strm)
+				strm->readyWrite();
 			return;
+		}
 		hp = &tqueue.head();
 	}
 
@@ -605,7 +615,11 @@ void BaseStream::txData(Packet &p)
 
 	// Re-queue us on our flow immediately
 	// if we still have more data to send.
-	return txenqflow();
+	if (tqueue.isEmpty()) {
+		if (strm)
+			strm->readyWrite();
+	} else
+		txenqflow();
 }
 
 void BaseStream::txDatagram()
@@ -696,13 +710,18 @@ void BaseStream::acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq)
 
 	switch (pkt.type) {
 	case DataPacket:
+		// Mark the segment no longer "in flight".
+		endflight(pkt);
+
 		// Record this TSN as having been ACKed,
 		// so that we don't spuriously resend it
 		// if another instance is back in our transmit queue.
 		twait.remove(pkt.tsn);
-
-		// Mark the segment no longer "in flight".
-		endflight(pkt);
+		twaitsize -= pkt.payloadSize();
+		Q_ASSERT(twait.isEmpty() == (twaitsize == 0));
+		if (strm)
+			strm->bytesWritten(pkt.payloadSize());
+			// XXX delay and coalesce signal
 
 		// fall through...
 
@@ -1562,6 +1581,7 @@ int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 
 		// Hold onto the packet data until it gets ACKed
 		twait.insert(p.tsn);
+		twaitsize += size;
 
 		// Queue up the segment for transmission ASAP
 		txenqueue(p);

@@ -40,6 +40,14 @@ struct LinkParams {
 	QString toString();
 };
 
+enum LinkPreset {
+	DSL15,		// 1.5Mbps/384Kbps DSL link
+	Cable5,		// 5Mbps cable modem link
+	Eth10,		// 10Mbps Ethernet link
+	Eth100,		// 100Mbps Ethernet link
+	Eth1000,	// 1000Mbps Ethernet link
+};
+
 class SimTimerEngine : public TimerEngine
 {
 	friend class SimHost;
@@ -178,14 +186,6 @@ private:
 
 public:
 
-	enum LinkPreset {
-		DSL15,		// 1.5Mbps/384Kbps DSL link
-		Cable5,		// 5Mbps cable modem link
-		Eth10,		// 10Mbps Ethernet link
-		Eth100,		// 100Mbps Ethernet link
-		Eth1000,	// 1000Mbps Ethernet link
-	};
-
 	SimLink(LinkPreset preset = Eth100);
 	~SimLink();
 
@@ -198,6 +198,16 @@ public:
 
 	inline LinkParams downLinkParams() const { return params[0]; }
 	inline LinkParams upLinkParams() const { return params[1]; }
+
+	void setPreset(LinkPreset preset);
+
+	void setLinkParams(const LinkParams &down, const LinkParams &up);
+	inline void setLinkParams(const LinkParams &params)
+		{ setLinkParams(params, params); }
+
+	inline void setLinkRate(int down, int up)
+		{ params[0].rate = down; params[1].rate = up; }
+	inline void setLinkRate(int bps) { setLinkRate(bps, bps); }
 };
 
 class Simulator : public QObject

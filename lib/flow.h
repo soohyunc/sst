@@ -50,6 +50,14 @@ typedef quint64 PacketSeq;
 static const PacketSeq maxPacketSeq = ~(PacketSeq)0;
 
 
+enum CCMode {
+	CC_TCP,
+	CC_AGGRESSIVE,
+	CC_DELAY,
+	CC_VEGAS,
+};
+
+
 // Abstract base class for flow encryption and authentication schemes.
 class FlowArmor : public QObject
 {
@@ -82,7 +90,8 @@ class Flow : public SocketFlow
 private:
 	Host *const h;
 	FlowArmor *armr;	// Encryption/authentication method
-	FlowCC *cc;		// Congestion control method
+	//FlowCC *cc;		// Congestion control method
+	CCMode ccmode;		// Congestion control method
 	bool nocc;		// Disable congestion control.  XXX
 
 	// Per-direction unique channel IDs for this channel.
@@ -142,8 +151,8 @@ public:
 
 	// Set the congestion controller for this flow.
 	// This must be set if the client wishes to call mayTransmit().
-	inline void setCongestionController(FlowCC *cc) { this->cc = cc; }
-	inline FlowCC *congestionController() { return cc; }
+	//inline void setCongestionController(FlowCC *cc) { this->cc = cc; }
+	//inline FlowCC *congestionController() { return cc; }
 
 	// Start and stop the flow.
 	virtual void start(bool initiator);
@@ -261,6 +270,9 @@ public:
 
 	inline bool deleyedAcks() const { return delayack; }
 	inline void setDelayedAcks(bool enabled) { delayack = enabled; }
+
+	inline CCMode ccMode() const { return ccmode; }
+	inline void setCCMode(CCMode mode) { ccmode = mode; }
 
 	// Congestion information accessors for flow monitoring purposes
 	inline int txCongestionWindow() { return cwnd; }

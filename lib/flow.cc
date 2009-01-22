@@ -43,13 +43,6 @@ using namespace SST;
 #define ACKACKPACKETS	4		// Delay before for ACKing only ACKs
 
 
-enum CCMode {
-	CC_TCP,
-	CC_AGGRESSIVE,
-	CC_DELAY,
-	CC_VEGAS,
-} ccmode = CC_TCP;
-
 
 ////////// FlowArmor //////////
 
@@ -64,7 +57,7 @@ Flow::Flow(Host *host, QObject *parent)
 :	SocketFlow(parent),
 	h(host),
 	armr(NULL),
-	cc(NULL), nocc(false),
+	ccmode(CC_TCP), nocc(false),
 	rtxtimer(host),
 	linkstat(LinkDown),
 	delayack(false), // XXX breaks current brain-damaged flow control
@@ -794,16 +787,19 @@ void Flow::statsTimeout()
 		cumrtt, cumpps, cumloss);
 }
 
-void Flow::acked(quint64, int, quint64)
+void Flow::acked(quint64 seq, int n, quint64)
 {
+	qDebug() << this << "tx seq" << seq << "-" << seq+n-1 << "acked";
 }
 
 void Flow::missed(quint64, int)
 {
+	//qDebug() << this << "tx seq" << seq << "missed";
 }
 
 void Flow::expire(quint64, int)
 {
+	//qDebug() << this << "tx seq" << seq << "expired";
 }
 
 

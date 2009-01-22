@@ -529,10 +529,15 @@ signals:
 	 */
 	void readyReadDatagram();
 
+	/* Emitted when our transmit buffer contains only in-flight data
+	 * and we could transmit more immediately if the app supplies more.
+	 */
+	void readyWrite();
+
 	/** Emitted when some locally buffered data gets flushed
 	 * after being delivered to the receiver and acknowledged.
-	 * XXX not implemented yet. */
-	void bytesWritten(qint64 bytes);
+	 * (QIODevice) */
+	//void bytesWritten(qint64 bytes);
 
 	/** Emitted when the stream establishes live connectivity
 	 * upon first connecting, or after being down or stalled. */
