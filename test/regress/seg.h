@@ -44,6 +44,7 @@ private:
 	// Flow layer objects (XXX hack hack)
 	FlowSocket fs1, fs4;
 	FlowResponder fr1, fr2, fr3, fr4;
+	FlowSegment *si1, *sr2, *si2, *sr3, *si3, *sr4;
 
 	Stream cli;
 	StreamServer srv;
@@ -59,7 +60,9 @@ private:
 
 private slots:
 	void gotConnection();
+	void gotData();
 	void gotMessage();
+	void gotEventStep();
 };
 
 

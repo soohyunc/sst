@@ -1097,7 +1097,7 @@ void BaseStream::rxData(QByteArray &pkt, quint32 byteseq)
 		rbufused += actsize;
 		if ((rseg.flags() & (dataMessageFlag | dataCloseFlag))
 				&& (rmsgavail > 0)) {
-			qDebug() << this << "received message";
+			//qDebug() << this << "received message";
 			rmsgsize.enqueue(rmsgavail);
 			rmsgavail = 0;
 		}

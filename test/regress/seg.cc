@@ -38,17 +38,21 @@ SegTest::SegTest()
 	fs1(&h1, QHostAddress("1.1.34.4")),
 	fs4(&h4, QHostAddress("1.1.12.1")),
 	fr1(&h1), fr2(&h2), fr3(&h3), fr4(&h4),
+	si1(NULL), sr2(NULL), si2(NULL), sr3(NULL), si3(NULL), sr4(NULL),
 	cli(&h1),
 	srv(&h4),
 	srvs(NULL)
 {
+	// Gather simulation statistics
+	connect(&sim, SIGNAL(eventStep()), this, SLOT(gotEventStep()));
+
 	// Set up the linear topology
-	h1.attach(QHostAddress("1.1.12.1"), &l12);
-	h2.attach(QHostAddress("1.1.12.2"), &l12);
-	h2.attach(QHostAddress("1.1.23.2"), &l23);
-	h3.attach(QHostAddress("1.1.23.3"), &l23);
-	h3.attach(QHostAddress("1.1.34.3"), &l34);
-	h4.attach(QHostAddress("1.1.34.4"), &l34);
+	l12.connect(&h1, QHostAddress("1.1.12.1"),
+		    &h2, QHostAddress("1.1.12.2"));
+	l23.connect(&h2, QHostAddress("1.1.23.2"),
+		    &h3, QHostAddress("1.1.23.3"));
+	l34.connect(&h3, QHostAddress("1.1.34.3"),
+		    &h4, QHostAddress("1.1.34.4"));
 
 	// Set up the flow layer forwarding chain (XXX horrible hack)
 	fr2.forwardTo(Endpoint(QHostAddress("1.1.23.3"), FLOW_PORT));
@@ -56,16 +60,17 @@ SegTest::SegTest()
 	fr4.forwardUp(&fs4);
 
 	// Initiate a flow layer connection
-	fs1.initiateTo(Endpoint(QHostAddress("1.1.12.2"), FLOW_PORT));
+	si1 = fs1.initiateTo(Endpoint(QHostAddress("1.1.12.2"), FLOW_PORT));
 
 	// Set up the application-level server
 	connect(&srv, SIGNAL(newConnection()),
 		this, SLOT(gotConnection()));
 	if (!srv.listen("regress", "SST regression test server",
-			"migrate", "Migration test protocol"))
+			"seg", "Flow segmentation test protocol"))
 		qFatal("Can't listen on service name");
 
 	// Open a connection to the server
+	connect(&cli, SIGNAL(readyRead()), this, SLOT(gotData()));
 	connect(&cli, SIGNAL(readyReadMessage()), this, SLOT(gotMessage()));
 	cli.connectTo(h4.hostIdent(), "regress", "seg");
 	cli.connectAt(Endpoint(QHostAddress("1.1.34.4"), NETSTERIA_DEFAULT_PORT));
@@ -85,6 +90,11 @@ void SegTest::gotConnection()
 	srvs->listen(Stream::Unlimited);
 
 	connect(srvs, SIGNAL(readyReadMessage()), this, SLOT(gotMessage()));
+
+	// All the flows should now exist
+	sr2 = fr2.lastiseg;	si2 = fr2.lastoseg;
+	sr3 = fr3.lastiseg;	si3 = fr3.lastoseg;
+	sr4 = fr4.lastiseg;
 }
 
 void SegTest::ping(Stream *strm)
@@ -95,6 +105,15 @@ void SegTest::ping(Stream *strm)
 	buf.resize(1 << p2);
 	//qDebug() << strm << "send msg size" << buf.size();
 	strm->writeMessage(buf);
+}
+
+void SegTest::gotData()
+{
+	Stream *strm = (Stream*)QObject::sender();
+	while (true) {
+		QByteArray buf = strm->readData();
+		qDebug() << strm << "recv data size" << buf.size();
+	}
 }
 
 void SegTest::gotMessage()
@@ -127,6 +146,24 @@ void SegTest::gotMessage()
 			ping(strm);
 #endif
 	}
+}
+
+void SegTest::gotEventStep()
+{
+	if (!si1 || !sr4)
+		return;		// flows not yet setup
+
+	// Initiator-to-responder path
+	qDebug() << sim.currentTime().usecs
+		<< si1->txPacketsInFlight() << "/" << si1->txCongestionWindow()
+		<< si2->txPacketsInFlight() << "/" << si2->txCongestionWindow()
+		<< si3->txPacketsInFlight() << "/" << si3->txCongestionWindow();
+
+	// Responder-to-initiator path
+	//qDebug() << sim.currentTime().usecs
+	//	<< sr4->txPacketsInFlight() << "/" << sr4->txCongestionWindow()
+	//	<< sr3->txPacketsInFlight() << "/" << sr3->txCongestionWindow()
+	//	<< sr2->txPacketsInFlight() << "/" << sr2->txCongestionWindow();
 }
 
 void SegTest::run()

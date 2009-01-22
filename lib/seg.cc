@@ -86,13 +86,14 @@ bool FlowSegment::flowReceive(qint64 pktseq, QByteArray &pkt)
 	// Stash the packet in our queue until the next segment takes it.
 	// Implement a basic drop-tail policy for the moment.
 	if (rxq.size() >= qlim) {
-		qDebug("flow middlebox queue overflow; dropping packet");
+		qDebug("flow middlebox queue overflow; DROP packet");
 		return false;
 	}
 	RxPkt rp;
 	rp.rxseq = pktseq;
 	rp.pkt = pkt;
 	rxq.enqueue(rp);
+	qDebug() << this << "queue size" << rxq.size();
 
 	// Notify the downstream segment
 	Q_ASSERT(other->other == this);
@@ -146,7 +147,7 @@ FlowSocket::~FlowSocket()
 	qDebug() << this << "~FlowSocket";
 }
 
-void FlowSocket::initiateTo(const Endpoint &remoteep)
+FlowSegment *FlowSocket::initiateTo(const Endpoint &remoteep)
 {
 	Q_ASSERT(fseg == NULL);
 	fseg = new FlowSegment(host(), this);
@@ -156,6 +157,8 @@ void FlowSocket::initiateTo(const Endpoint &remoteep)
 	// Bind the segment to the host's main socket
 	if (!fseg->initiateTo(host()->activeSockets().at(0), remoteep))
 		qFatal("FlowSocket::initiateTo failed");//XXX
+
+	return fseg;
 }
 
 // XXX unused
@@ -246,7 +249,8 @@ QString FlowSocket::errorString()
 
 FlowResponder::FlowResponder(Host *h)
 :	KeyResponder(h, flow_seg_magic),
-	fsock(NULL)
+	fsock(NULL),
+	lastiseg(NULL), lastoseg(NULL)	// XXX
 {
 }
 
@@ -272,6 +276,8 @@ Flow *FlowResponder::newFlow(const SocketEndpoint &epi, const QByteArray &,
 		return NULL;
 	}
 
+	lastiseg = fseg;	// XXX hack
+
 	// Set up the onward or upward forwarding path
 	if (fsock) {
 		fseg->fsock = fsock;	// just forward up to this socket
@@ -292,6 +298,8 @@ Flow *FlowResponder::newFlow(const SocketEndpoint &epi, const QByteArray &,
 		}
 		oseg->other = fseg;
 		fseg->other = oseg;
+
+		lastoseg = oseg;	// XXX hack
 	}
 
 	return fseg;

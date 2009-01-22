@@ -32,6 +32,14 @@ class SimHost;
 class SimLink;
 class Simulator;
 
+struct LinkParams {
+	int rate;	// Bandwidth in bytes per second
+	int delay;	// Link delay in microseconds
+	int qlen;	// Router queue length in microseconds
+
+	QString toString();
+};
+
 class SimTimerEngine : public TimerEngine
 {
 	friend class SimHost;
@@ -101,6 +109,7 @@ class SimHost : public Host
 	friend class SimTimerEngine;
 	friend class SimPacket;
 	friend class SimSocket;
+	friend class SimLink;
 
 private:
 	Simulator *sim;
@@ -113,9 +122,6 @@ private:
 
 	// Queue of packets to be delivered to this host
 	QList<SimPacket*> pqueue;
-
-	// Minimum network arrival time for next packet to be received
-	qint64 arrival;
 
 public:
 	SimHost(Simulator *sim);
@@ -142,14 +148,6 @@ public:
 	// If found, also sets srcaddr to this host's address
 	// on the network link on which the neighbor is found.
 	SimHost *neighborAt(const QHostAddress &dstaddr, QHostAddress &srcaddr);
-
-	// Attach to a network link at a given IP address.
-	// Note that a host may be attached to the same link
-	// at more than one address.
-	void attach(const QHostAddress &addr, SimLink *link);
-
-	// Detach from a network link at a given IP address.
-	void detach(const QHostAddress &addr, SimLink *link);
 };
 
 class SimLink
@@ -160,31 +158,46 @@ class SimLink
 private:
 	Simulator *sim;
 
-	// Hosts attached to this link
-	QHash<QHostAddress, SimHost*> hosts;
+	// Hosts attached to this link.
+	// For asymmetric links, the first is "down", the second "up".
+	SimHost *hosts[2];
 
-	// Network performance settings
-	int netrate;		// Link bandwidth in bytes per second
-	int netdelay;		// Link delay in microseconds one-way
-	int netbufmul;		// Delay multiplier representing net buffering
+	// Address at which each host is attached to this link
+	QHostAddress addrs[2];
+
+	// Network performance settings: 0=down, 1=up
+	LinkParams params[2];
+
+	// Minimum network arrival time for next packet to be received
+	qint64 arrival[2];
+
+	inline int which(SimHost *h) {
+		Q_ASSERT(h == hosts[0] || h == hosts[1]);
+		return h == hosts[1];
+	}
 
 public:
 
 	enum LinkPreset {
+		DSL15,		// 1.5Mbps/384Kbps DSL link
+		Cable5,		// 5Mbps cable modem link
+		Eth10,		// 10Mbps Ethernet link
 		Eth100,		// 100Mbps Ethernet link
 		Eth1000,	// 1000Mbps Ethernet link
 	};
 
-	SimLink(LinkPreset preset = Eth1000);
+	SimLink(LinkPreset preset = Eth100);
 	~SimLink();
 
-	inline int netRate() const { return netrate; }
-	inline int netDelay() const { return netdelay; }
-	inline int netBufferMultiplier() const { return netbufmul; }
+	// Connect two hosts via this link
+	void connect(SimHost *downHost, const QHostAddress &downAddr,
+			SimHost *upHost, const QHostAddress &upAddr);
 
-	void setNetRate(int rate) { netrate = rate; }
-	void setNetDelay(int delay) { netdelay = delay; }
-	void setNetBufferMultiplier(int bufmul) { netbufmul = bufmul; }
+	// Disconnect this link
+	void disconnect();
+
+	inline LinkParams downLinkParams() const { return params[0]; }
+	inline LinkParams upLinkParams() const { return params[1]; }
 };
 
 class Simulator : public QObject
@@ -215,6 +228,12 @@ public:
 	Time currentTime();
 
 	void run();
+
+signals:
+	// The simulator emits this signal after each event processing step,
+	// but before waiting for the next event to occur.
+	// This can be hooked to output state statistics after each step.
+	void eventStep();
 };
 
 } // namespace SST

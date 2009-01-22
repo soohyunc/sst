@@ -262,6 +262,10 @@ public:
 	inline bool deleyedAcks() const { return delayack; }
 	inline void setDelayedAcks(bool enabled) { delayack = enabled; }
 
+	// Congestion information accessors for flow monitoring purposes
+	inline int txCongestionWindow() { return cwnd; }
+	inline int txPacketsInFlight() { return unackedDataPackets(); }
+
 signals:
 	// Indicates when this flow observes a change in link status.
 	void linkStatusChanged(LinkStatus newstatus);
@@ -298,8 +302,12 @@ private:
 	inline void rtxstart()
 		{ rtxtimer.start((int)(cumrtt * 2.0)); }
 
+	// Repeat stall indications but not other link status changes.
+	// XXX hack - maybe "stall severity" or "stall time"
+	// should be part of status?
+	// Or perhaps status should be (up, stalltime)?
 	inline void setLinkStatus(LinkStatus newstat)
-		{ if (linkstat != newstat) {
+		{ if (linkstat != newstat || newstat == LinkStalled) {
 			linkStatusChanged(linkstat = newstat); } }
 
 

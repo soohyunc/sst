@@ -28,7 +28,7 @@
 using namespace SST;
 
 
-#define MSGPERIOD	10
+#define MSGPERIOD	(1024*1024)	// transfer min 1MB between migrs
 
 //#define MAXMSGS		1000
 
@@ -46,8 +46,7 @@ MigrateTest::MigrateTest()
 	nmigrates(0)
 {
 	curaddr = cliaddr;
-	clihost.attach(cliaddr, &link);
-	srvhost.attach(srvaddr, &link);
+	link.connect(&clihost, curaddr, &srvhost, srvaddr);
 
 	starttime = clihost.currentTime();
 	connect(&migrater, SIGNAL(timeout(bool)), this, SLOT(gotTimeout()));
@@ -98,10 +97,8 @@ void MigrateTest::gotMessage()
 		if (buf.isNull())
 			return;
 
-		//qDebug() << strm << "recv msg size" << buf.size();
-		narrived++;
-
-		if (narrived == MSGPERIOD) {
+		int newarrived = narrived + buf.size();
+		if (narrived < MSGPERIOD && newarrived >= MSGPERIOD) {
 			timeperiod = clihost.currentTime().usecs
 				- starttime.usecs;
 			qDebug() << "migr" << nmigrates << "timeperiod:"
@@ -112,6 +109,10 @@ void MigrateTest::gotMessage()
 			// "unexpected moments"...
 			migrater.start(timeperiod * drand48());
 		}
+		narrived = newarrived;
+
+		qDebug() << strm << "recv msg size" << buf.size()
+			<< "count" << narrived << "/" << MSGPERIOD;
 
 		// Keep ping-ponging until we're done.
 		if (nmigrates < MAXMIGRS)
@@ -129,8 +130,8 @@ void MigrateTest::gotTimeout()
 
 	// Migrate!
 	qDebug() << "migrating to" << newaddr;
-	clihost.detach(curaddr, &link);
-	clihost.attach(newaddr, &link);
+	link.disconnect();
+	link.connect(&clihost, newaddr, &srvhost, srvaddr);
 	curaddr = newaddr;
 	srvs->connectAt(Endpoint(newaddr, NETSTERIA_DEFAULT_PORT));
 

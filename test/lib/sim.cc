@@ -49,6 +49,95 @@ using namespace SST;
 #define PKTOH	32		// Bytes of link/inet overhead per packet
 
 
+// Typical ADSL uplink/downlink bandwidths and combinations (all in Kbps)
+// (e.g., see Dischinger et al, "Characterizing Residental Broadband Networks")
+const int dsl_dn_bw[] = {128,256,384,512,768,1024,1536,2048,3072,4096,6144};
+const int dsl_up_bw[] = {128,384,512,768};
+const int dsl_bw[][2] =	// specific down/up combinations
+	{{128,128},{384,128},{768,384},{1024,384},{1536,384},{2048,384},
+	 {3072,512},{4096,512},{6144,768}};
+
+#define DSL_DN_BW	1536	// Most common ADSL link speed in 2007
+#define DSL_UP_BW	384
+
+#define CABLE_DN_BW	5000	// Most common cable link speed
+#define CABLE_UP_BW	384
+
+// Typical SDSL/SHDSL bandwidth parameters (Kbps)
+const int sdsl_bw[] = {512,1024,1536,2048,4096};
+
+
+// Typical cable modem uplink/downlink bandwidths (all in Kbps)
+const int cable_down_bw[] = {1500, 3000, 5000, 6000, 8000, 9000};
+const int cable_up_bw[] = {250, 400, 500, 1000, 1500};
+
+
+// Common downlink queue sizes in Kbytes, according to QFind results
+// (Claypool et al, "Inferring Queue Sizes in Access Networks...")
+const int dsl_dn_qsize[] = {10, 15, 25, 40, 55, 60};
+const int cable_dn_qsize[] = {5, 10, 15, 20};
+
+
+// Common measured last-hop link delays from Dischinger study:
+// Note: round-trip, in milliseconds
+const int dsl_delay[] = {7, 10, 13, 15, 20};
+const int cable_delay[] = {5, 7, 10, 20};
+
+#define DSL_RTDELAY	13	// approx median, milliseconds
+#define CABLE_RTDELAY	7	// approx median, milliseconds
+
+
+// Common downlink and uplink queue lengths in milliseconds,
+// according to Dischinger et al study
+const int dsl_dn_qlen[] = {30,90,130,200,250,300,350,400};
+const int dsl_up_qlen[] = {50,250,750,1200,1700,2500};
+const int cable_dn_qlen[] = {30,75,130,200,250};
+const int cable_up_qlen[] = {100,800,1800,2200,2500,3000,4000};
+
+#define DSL_DN_QLEN	300
+#define DSL_UP_QLEN	750	// Very common among many ISPs
+#define CABLE_DN_QLEN	130	// Very common among many ISPs
+#define CABLE_UP_QLEN	2200
+
+
+// Typical residential broadband DSL link
+const LinkParams dsl15_dn =
+	{ DSL_DN_BW*1024/8, DSL_RTDELAY*1000/2, DSL_DN_QLEN*1000 };
+const LinkParams dsl15_up =
+	{ DSL_UP_BW*1024/8, DSL_RTDELAY*1000/2, DSL_UP_QLEN*1000 };
+
+// Typical residential cable modem link
+const LinkParams cable5_dn =
+	{ CABLE_DN_BW*1024/8, CABLE_RTDELAY*1000/2, CABLE_DN_QLEN*1000 };
+const LinkParams cable5_up =
+	{ CABLE_UP_BW*1024/8, CABLE_RTDELAY*1000/2, CABLE_UP_QLEN*1000 };
+
+
+// Calculate transmission time of one packet in microseconds,
+// given a packet size in bytes and transmission rate in bytes per second
+#define	txtime(bytes,rate)	((qint64)(bytes) * 1000000 / (rate))
+
+#define ETH10_RATE	(10*1024*1024/8)
+#define ETH100_RATE	(100*1024*1024/8)
+#define ETH1000_RATE	(1000*1024*1024/8)
+
+#define ETH10_DELAY	(2000/2)	// XXX wild guess
+#define ETH100_DELAY	(1000/2)	// XXX one data-point, YMMV
+#define ETH1000_DELAY	(650/2)		// XXX one data-point, YMMV
+
+#define ETH_MTU		1500	// Standard Ethernet MTU
+#define ETH_QPKTS	25	// Typical queue length in packets (???)
+#define ETH_QBYTES	(ETH_MTU * ETH_QPKTS)
+
+// 10Mbps Ethernet link
+const LinkParams eth10 =
+	{ ETH10_RATE, ETH10_DELAY/2, txtime(ETH_QBYTES,ETH10_RATE) };
+const LinkParams eth100 =
+	{ ETH100_RATE, ETH100_DELAY/2, txtime(ETH_QBYTES,ETH100_RATE) };
+const LinkParams eth1000 =
+	{ ETH1000_RATE, ETH1000_DELAY/2, txtime(ETH_QBYTES,ETH1000_RATE) };
+
+
 static bool tracepkts = false;
 
 
@@ -58,6 +147,21 @@ static bool tracepkts = false;
 static inline bool isclient(const QHostAddress &addr)
 {
 	return (addr.toIPv4Address() >> 24) == 1;
+}
+
+
+
+////////// LinkParams //////////
+
+QString LinkParams::toString()
+{
+	QString speed = rate < 1024*1024
+		? QString("%1Kbps").arg((float)rate * 8 / (1024))
+		: QString("%1Mbps").arg((float)rate * 8 / (1024*1024));
+	return QString("%1 delay %2ms qlen %3ms")
+		.arg(speed)
+		.arg((float)delay / 1000)
+		.arg((float)qlen / 1000);
 }
 
 
@@ -111,8 +215,9 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src,
 
 	// Find the destination on the appropriate incident link;
 	// drop the packet if destination host not found.
-	dsth = lnk->hosts.value(dst.addr);
-	if (!dsth) {
+	int w = lnk->which(srch);
+	dsth = lnk->hosts[!w];
+	if (!dsth || !(lnk->addrs[!w] == dst.addr)) {
 		qDebug() << this << "target host"
 			<< dst.addr.toString() << "not on specified link!";
 		deleteLater();
@@ -121,45 +226,52 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src,
 
 	qint64 curusecs = sim->currentTime().usecs;
 
+	// Pick the correct set of link parameters to simulate with
+	LinkParams &p = lnk->params[!w];
+	qint64 &arr = lnk->arrival[!w];
+
+	// Earliest time packet could start to arrive based on network delay
+	qint64 nomarr = curusecs + p.delay;
+
+	// Compute the time the packet's first bit will actually arrive -
+	// it can't start arriving sooner than the last packet finished.
+	qint64 actarr = qMax(nomarr, arr);
+
+	// If the computed arrival time is too late, drop this packet.
+	// Implement a standard, basic drop-tail policy.
+	bool drop = actarr > nomarr + p.qlen;
+
 	// Compute the amount of wire time this packet takes to transmit,
 	// including some per-packet link/inet overhead
 	qint64 psize = buf.size() + PKTOH;
-	qint64 ptime = psize * 1000000 / lnk->netrate;
-
-	// Nominal arrival time based only on network delay
-	qint64 nomarrival = curusecs + lnk->netdelay;
-
-	// Decide when this packet will/would arrive at the destination,
-	// by counting from the minimum ping delay or the last arrival,
-	// whichever is later.
-	qint64 arrival = qMax(nomarrival, dsth->arrival) + ptime;
-
-	// If the computed arrival time is too late, drop this packet.
-	qint64 mtutime = 1200 * 1000000 / lnk->netrate;
-	bool drop = arrival > nomarrival + (mtutime * lnk->netbufmul);
+	qint64 ptime = psize * 1000000 / p.rate;
 
 	quint32 seqno = ntohl(*(quint32*)buf.data()) & 0xffffff;
 	if (tracepkts)
 	if (isclient(src.addr))
 		qDebug("%12lld:\t\t     --> %6d %4d --> %4s  @%lld",
 			curusecs, seqno, buf.size(), drop ? "DROP" : "",
-			drop ? 0 : arrival);
+			drop ? 0 : actarr + ptime);
 	else
 		qDebug("%12lld:\t\t\t\t%4s <-- %6d %4d <--  @%lld",
 			curusecs, drop ? "DROP" : "", seqno, buf.size(),
-			drop ? 0 : arrival);
+			drop ? 0 : actarr + ptime);
 
 	if (drop) {
+		qDebug() << "SimPacket: DROP";
 		deleteLater();
 		return;
 	}
-	dsth->arrival = arrival;
+
+	// Finally, record the time the packet will finish arriving,
+	// and schedule the packet to arrive at that time.
+	arr = actarr + ptime;
 
 	// Add it to the host's receive packet queue
 	dsth->pqueue.append(this);
 
 	connect(&timer, SIGNAL(timeout(bool)), this, SLOT(arrive()));
-	timer.start(dsth->arrival - curusecs);
+	timer.start(arr - curusecs);
 }
 
 void SimPacket::arrive()
@@ -299,7 +411,7 @@ QString SimSocket::errorString()
 ////////// SimHost //////////
 
 SimHost::SimHost(Simulator *sim)
-:	sim(sim), arrival(0)
+:	sim(sim)
 {
 	initSocket(NULL);
 
@@ -315,7 +427,7 @@ SimHost::~SimHost()
 
 	// Detach this host from all network links
 	foreach (const QHostAddress addr, links.keys()) {
-		detach(addr, links.value(addr));
+		links.value(addr)->disconnect();
 	}
 	Q_ASSERT(links.empty());
 
@@ -344,35 +456,17 @@ Socket *SimHost::newSocket(QObject *parent)
 	return new SimSocket(this, parent);
 }
 
-void SimHost::attach(const QHostAddress &addr, SimLink *link)
-{
-	Q_ASSERT(!links.contains(addr));
-	Q_ASSERT(!link->hosts.contains(addr));
-
-	links.insert(addr, link);
-	link->hosts.insert(addr, this);
-}
-
-void SimHost::detach(const QHostAddress &addr, SimLink *link)
-{
-	Q_ASSERT(link);
-	Q_ASSERT(links.value(addr) == link);
-	Q_ASSERT(link->hosts.value(addr) == this);
-
-	links.remove(addr);
-	link->hosts.remove(addr);
-}
-
 SimHost *SimHost::neighborAt(const QHostAddress &dstaddr, QHostAddress &srcaddr)
 {
 	QHashIterator<QHostAddress, SimLink*> i(links);
 	while (i.hasNext()) {
 		i.next();
 		SimLink *l = i.value();
-		SimHost *h = l->hosts.value(dstaddr);
-		if (h) {
+		int w = l->which(this);
+		Q_ASSERT(l->addrs[w] == i.key());
+		if (l->addrs[!w] == dstaddr) {
 			srcaddr = i.key();
-			return h;
+			return l->hosts[!w];
 		}
 	}
 	return NULL;	// not found
@@ -383,30 +477,58 @@ SimHost *SimHost::neighborAt(const QHostAddress &dstaddr, QHostAddress &srcaddr)
 
 SimLink::SimLink(LinkPreset preset)
 {
-	netbufmul = 10;	// XXX ???
+	hosts[0] = hosts[1] = NULL;
+	arrival[0] = arrival[1] = 0;
 
 	switch (preset) {
 	default:
-		Q_ASSERT(0);
-	case Eth100:
-		netrate = 100000/8;
-		netdelay = 1000/2;
-		break;
-	case Eth1000:
-		netrate = 100000/8;
-		netdelay = 650/2;
-		break;
+	case DSL15: params[0] = dsl15_dn; params[1] = dsl15_up; break;
+	case Cable5: params[0] = cable5_dn; params[1] = cable5_up; break;
+	case Eth10: params[0] = params[1] = eth10; break;
+	case Eth100: params[0] = params[1] = eth100; break;
+	case Eth1000: params[0] = params[1] = eth1000; break;
 	}
+
+	qDebug() << this << "downlink:" << params[0].toString();
+	qDebug() << this << "uplink:" << params[1].toString();
 }
 
 SimLink::~SimLink()
 {
-	// Detach this link from all hosts
-	foreach (const QHostAddress addr, hosts.keys()) {
-		hosts.value(addr)->detach(addr, this);
-	}
-	Q_ASSERT(hosts.empty());
+	disconnect();
 }
+
+void SimLink::connect(SimHost *downHost, const QHostAddress &downAddr,
+		SimHost *upHost, const QHostAddress &upAddr)
+{
+	Q_ASSERT(upHost != downHost);
+	Q_ASSERT(upAddr != downAddr);
+	Q_ASSERT(hosts[0] == NULL);
+	Q_ASSERT(hosts[1] == NULL);
+
+	hosts[0] = downHost;
+	addrs[0] = downAddr;
+	hosts[1] = upHost;
+	addrs[1] = upAddr;
+
+	Q_ASSERT(downHost->links.value(downAddr) == NULL);
+	downHost->links.insert(downAddr, this);
+
+	Q_ASSERT(upHost->links.value(upAddr) == NULL);
+	upHost->links.insert(upAddr, this);
+}
+
+void SimLink::disconnect()
+{
+	for (int i = 0; i < 2; i++) {
+		if (hosts[i]) {
+			Q_ASSERT(hosts[i]->links.value(addrs[i]) == this);
+			hosts[i]->links.remove(addrs[i]);
+			hosts[i] = 0;
+		}
+	}
+}
+
 
 
 ////////// Simulator //////////
@@ -455,6 +577,7 @@ void Simulator::run()
 		QCoreApplication::processEvents(QEventLoop::DeferredDeletion);
 
 		//qDebug() << "";	// print blank lines at time increments
+		eventStep();		// notify interested listeners
 	}
 	//qDebug() << "Simulator::run() done";
 }

@@ -102,7 +102,7 @@ public:
 			QObject *parent = NULL);
 	~FlowSocket();
 
-	void initiateTo(const Endpoint &remoteep);
+	FlowSegment *initiateTo(const Endpoint &remoteep);
 
 	inline Host *host() { return h; }
 
@@ -126,6 +126,8 @@ public:
 
 	void forwardTo(const Endpoint &targetep);
 	void forwardUp(FlowSocket *fsock);
+
+	FlowSegment *lastiseg, *lastoseg; // XXX hack for monitoring purposes
 
 private:
 	virtual Flow *newFlow(const SocketEndpoint &epi, const QByteArray &idi,

@@ -48,8 +48,7 @@ DatagramTest::DatagramTest()
 	srvs(NULL),
 	narrived(0)
 {
-	clihost.attach(cliaddr, &link);
-	srvhost.attach(srvaddr, &link);
+	link.connect(&clihost, cliaddr, &srvhost, srvaddr);
 
 	connect(&srv, SIGNAL(newConnection()),
 		this, SLOT(gotConnection()));
