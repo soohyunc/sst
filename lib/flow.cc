@@ -60,7 +60,7 @@ Flow::Flow(Host *host, QObject *parent)
 	ccmode(CC_TCP), nocc(false),
 	rtxtimer(host),
 	linkstat(LinkDown),
-	delayack(false), // XXX breaks current brain-damaged flow control
+	delayack(true),
 	acktimer(host),
 	statstimer(host)
 {
@@ -73,23 +73,10 @@ Flow::Flow(Host *host, QObject *parent)
 	txackmask = 1;	// Ficticious packet 0 already "received"
 	recovseq = 1;
 	markseq = 1;
-	cwnd = CWND_MIN;
-	cwndlim = true;
-	ssthresh = CWND_MAX;
-	ssbase = 0;
-	cwndinc = 1;
-	cwndmax = CWND_MIN;
-	lastrtt = 0;
-	lastpps = 0;
-	basertt = 0;
-	basepps = 0;
-	cumrtt = RTT_INIT;
-	cumrttvar = 0;
-	cumpps = 0;
-	cumppsvar = 0;
-	cumpwr = 0;
-	cumbps = 0;
-	cumloss = 0;
+	marktime = host->currentTime();
+
+	// Initialize congestion control state
+	ccReset();
 
 	// Initialize retransmit state
 	connect(&rtxtimer, SIGNAL(timeout(bool)),
@@ -123,6 +110,31 @@ Flow::~Flow()
 		delete armr;
 	//if (cc)
 	//	delete cc;
+}
+
+void
+Flow::ccReset()
+{
+	qDebug() << this << "ccReset: mode" << ccmode;
+
+	cwnd = CWND_MIN;
+	cwndlim = true;
+	ssthresh = CWND_MAX;
+	sstoggle = true;
+	ssbase = 0;
+	cwndinc = 1;
+	cwndmax = CWND_MIN;
+	lastrtt = 0;
+	lastpps = 0;
+	basertt = 0;
+	basepps = 0;
+	cumrtt = RTT_INIT;
+	cumrttvar = 0;
+	cumpps = 0;
+	cumppsvar = 0;
+	cumpwr = 0;
+	cumbps = 0;
+	cumloss = 0;
 }
 
 void Flow::start(bool initiator)
@@ -506,8 +518,13 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 	markacks += newpackets;
 
 	if (!nocc) switch (ccmode) {
-	case CC_TCP: 
-	case CC_VEGAS: {
+	case CC_VEGAS:
+		sstoggle = !sstoggle;
+		if (sstoggle)
+			break;	// do slow start only once every two RTTs
+
+		// fall through...
+	case CC_TCP: {
 		// During standard TCP slow start procedure,
 		// increment cwnd for each newly-ACKed packet.
 		// XX TCP spec allows this to be <=,
@@ -523,8 +540,8 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 	case CC_DELAY:
 		if (cwndinc < 0)	// Only slow start during up-phase
 			break;
-		// fall through...
 
+		// fall through...
 	case CC_AGGRESSIVE: {
 		// We're always in slow start, but we only count ACKs received
 		// on schedule and after a per-roundtrip baseline.
@@ -640,10 +657,16 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 			break;
 
 		case CC_VEGAS: {
-			if (rtt < basertt)
+			// Keep track of the lowest RTT ever seen,
+			// as per the original Vegas algorithm.
+			// This has the known problem that it screws up
+			// if the path's actual base RTT changes.
+			if (basertt == 0)	// first packet
 				basertt = rtt;
-			else
-				basertt = (basertt * 255.0 + rtt) / 256.0;
+			else if (rtt < basertt)
+				basertt = rtt;
+			//else
+			//	basertt = (basertt * 255.0 + rtt) / 256.0;
 
 			float expect = (float)marksent / basertt;
 			float actual = (float)marksent / rtt;
@@ -651,20 +674,41 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 			Q_ASSERT(diffpps >= 0.0);
 			float diffpprt = diffpps * rtt;
 
-			if (diffpprt < 1.0 && cwnd < CWND_MAX)
+			if (diffpprt < 1.0 && cwnd < CWND_MAX && cwndlim) {
 				cwnd++;
-			else if (diffpprt > 3.0 && cwnd > CWND_MIN)
+				// ssthresh = qMax(ssthresh, cwnd / 2); ??
+			} else if (diffpprt > 3.0 && cwnd > CWND_MIN) {
 				cwnd--;
+				ssthresh = qMin(ssthresh, cwnd); // /2??
+			}
 
-		//	qDebug("Round-trip: basertt %.3f rtt %d "
-		//		"exp %.3f act %.3f diff %.3f cwnd %d",
-		//		basertt, rtt, expect, actual, diffpprt, cwnd);
+			qDebug("Round-trip: win %d basertt %.3f rtt %d "
+				"exp-pps %f act-pps %f diff-pprt %.3f cwnd %d",
+				marksent, basertt, rtt,
+				expect*1000000.0, actual*1000000.0,
+				diffpprt, cwnd);
 			break; }
+
+		case CC_CTCP: {
+#if 0
+			k = 0.8; a = 1/8; B = 1/2
+			if (in-recovery)
+				...
+			else if (diff < y) {
+				dwnd += sqrt(win)/8.0 - 1;
+			} else
+				dwnd -= C * diff;
+#endif
+			break; }
+
 		}
 
-		//qDebug("Cumulative: rtt %.3f[%.3f] pps %.3f[%.3f] pwr %.3f "
-		//	"loss %.3f",
-		//	cumrtt, cumrttvar, cumpps, cumppsvar, cumpwr, cumloss);
+		if (nocc)
+			qDebug() << "End-to-end rtt" << rtt << "cum" << cumrtt;
+		else
+		qDebug("Cumulative: rtt %.3f[%.3f] pps %.3f[%.3f] pwr %.3f "
+			"loss %.3f",
+			cumrtt, cumrttvar, cumpps, cumppsvar, cumpwr, cumloss);
 
 		lastrtt = rtt;
 		lastpps = pps;
@@ -686,8 +730,9 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 
 void Flow::acknowledge(quint16 pktseq, bool sendack)
 {
-	//qDebug() << this << "acknowledging" << pktseq
-	//	<< (sendack ? "(sending)" : "(not sending)");
+	qDebug() << this << "acknowledging" << pktseq
+		<< (sendack ? "(sending)" : "(not sending)")
+		<< "rxunacked" << rxunacked;
 
 	// Update our receive state to account for this packet
 	qint32 seqdiff = pktseq - rxackseq;

@@ -76,6 +76,7 @@ private:
 	SimHost *dsth;
 	QByteArray buf;
 	Timer timer;
+	bool isclient;
 
 public:
 	SimPacket(SimHost *srch, const Endpoint &src, 

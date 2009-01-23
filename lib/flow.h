@@ -55,6 +55,7 @@ enum CCMode {
 	CC_AGGRESSIVE,
 	CC_DELAY,
 	CC_VEGAS,
+	CC_CTCP,
 };
 
 
@@ -183,6 +184,7 @@ protected:
 
 	// TCP congestion control
 	quint32 ssthresh;	// Slow start threshold
+	bool sstoggle;		// Slow start toggle flag for CC_VEGAS
 
 	// Aggressive congestion control
 	quint32 ssbase;		// Slow start baseline
@@ -271,8 +273,9 @@ public:
 	inline bool deleyedAcks() const { return delayack; }
 	inline void setDelayedAcks(bool enabled) { delayack = enabled; }
 
+	void ccReset();
 	inline CCMode ccMode() const { return ccmode; }
-	inline void setCCMode(CCMode mode) { ccmode = mode; }
+	inline void setCCMode(CCMode mode) { ccmode = mode; ccReset(); }
 
 	// Congestion information accessors for flow monitoring purposes
 	inline int txCongestionWindow() { return cwnd; }

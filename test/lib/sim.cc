@@ -138,16 +138,7 @@ const LinkParams eth1000 =
 	{ ETH1000_RATE, ETH1000_DELAY/2, txtime(ETH_QBYTES,ETH1000_RATE) };
 
 
-static bool tracepkts = false;
-
-
-// Cheesy way to distinguish "clients" from "servers" in our tests,
-// for purposes of pretty-printing a left/right packet trace:
-// "clients" have IP addresses of the form 1.x.x.x.
-static inline bool isclient(const QHostAddress &addr)
-{
-	return (addr.toIPv4Address() >> 24) == 1;
-}
+static bool tracepkts = true;
 
 
 
@@ -247,8 +238,9 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src,
 	qint64 ptime = psize * 1000000 / p.rate;
 
 	quint32 seqno = ntohl(*(quint32*)buf.data()) & 0xffffff;
+	isclient = !w;	// XXX hacke
 	if (tracepkts)
-	if (isclient(src.addr))
+	if (isclient)
 		qDebug("%12lld:\t\t     --> %6d %4d --> %4s  @%lld",
 			curusecs, seqno, buf.size(), drop ? "DROP" : "",
 			drop ? 0 : actarr + ptime);
@@ -287,7 +279,7 @@ void SimPacket::arrive()
 
 	quint32 seqno = ntohl(*(quint32*)buf.data()) & 0xffffff;
 	if (tracepkts)
-	if (isclient(src.addr))
+	if (isclient)
 		qDebug("%12lld:\t\t\t\t\t\t        --> %6d %4d",
 			sim->currentTime().usecs, seqno, buf.size());
 	else
