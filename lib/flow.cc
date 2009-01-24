@@ -58,6 +58,7 @@ Flow::Flow(Host *host, QObject *parent)
 	h(host),
 	armr(NULL),
 	ccmode(CC_TCP), nocc(false),
+	missthresh(3),	// XX make adaptive for robustness to reordering
 	rtxtimer(host),
 	linkstat(LinkDown),
 	delayack(true),
@@ -68,9 +69,11 @@ Flow::Flow(Host *host, QObject *parent)
 
 	// Initialize transmit congestion control state
 	txseq = 1;
-	txdatseq = 0;
+	txevts.enqueue(TxEvent(0, false)); Q_ASSERT(txevts.size() == 1);
+	txevtseq = 0;
 	txackseq = 0;
 	txackmask = 1;	// Ficticious packet 0 already "received"
+	txfltcnt = txfltsize = 0;
 	recovseq = 1;
 	markseq = 1;
 	marktime = host->currentTime();
@@ -179,7 +182,7 @@ inline qint64 Flow::markElapsed()
 // with a specified ACK sequence/count word.
 // Returns true on success, false on error
 // (e.g., no output buffer space for packet)
-bool Flow::tx(QByteArray &pkt, quint32 packseq, quint64 &pktseq)
+bool Flow::tx(QByteArray &pkt, quint32 packseq, quint64 &pktseq, bool isdata)
 {
 	Q_ASSERT(isActive());
 
@@ -210,6 +213,18 @@ bool Flow::tx(QByteArray &pkt, quint32 packseq, quint64 &pktseq)
 	}
 	txseq++;
 
+	// Record the transmission event
+	TxEvent evt(pkt.size(), isdata);
+	if (isdata) {
+		txfltcnt++;
+		txfltsize += evt.size;
+		qDebug() << this << "tx-data seq" << txseq
+			<< "txfltcnt" << txfltcnt;
+	}
+	txevts.enqueue(evt);
+	Q_ASSERT(txevtseq + txevts.size() == txseq);
+	Q_ASSERT(txfltcnt <= (unsigned)txevts.size());
+
 	//qDebug() << this << "tx seq" << txseq << "size" << epkt.size();
 
 	// Ship it out
@@ -227,16 +242,13 @@ bool Flow::transmitAck(QByteArray &pkt, quint64 ackseq, unsigned ackct)
 		pkt.resize(hdrlen);
 	quint32 packseq = (ackct << ackctShift) | (ackseq & ackSeqMask);
 	quint64 pktseq;
-	return tx(pkt, packseq, pktseq);
+	return tx(pkt, packseq, pktseq, false);
 }
 
 // High-level public transmit function.
 bool Flow::flowTransmit(QByteArray &pkt, quint64 &pktseq)
 {
 	Q_ASSERT(pkt.size() > hdrlen);	// should be a nonempty data packet
-
-	// Record the fact that this is "real data" for which we want an ACK.
-	txdatseq = txseq;
 
 	// Include implicit acknowledgment of the latest packet(s) we've acked
 	quint32 packseq = (rxackct << ackctShift) | (rxackseq & seqMask);
@@ -246,7 +258,7 @@ bool Flow::flowTransmit(QByteArray &pkt, quint64 &pktseq)
 	}
 
 	// Send the packet
-	bool success = tx(pkt, packseq, pktseq);
+	bool success = tx(pkt, packseq, pktseq, true);
 
 	// If the retransmission timer is inactive, start it afresh.
 	// (If this was a retransmission, rtxTimeout() would have restarted it.)
@@ -265,9 +277,8 @@ int Flow::mayTransmit()
 	if (nocc)	// socket already provides congestion control
 		return SocketFlow::mayTransmit();
 
-	unsigned onthewire = unackedDataPackets();
-	if (cwnd > onthewire) {
-		return cwnd - onthewire;
+	if (cwnd > txfltcnt) {
+		return cwnd - txfltcnt;
 	} else {
 		cwndlim = true;
 		return 0;
@@ -287,25 +298,30 @@ void Flow::rtxTimeout(bool fail)
 	rtxtimer.restart();
 
 	// Reset cwnd and go back to slow start
-	ssthresh = (txseq - txackseq) / 2;
+	ssthresh = txfltcnt / 2;
 	ssthresh = qMax(ssthresh, CWND_MIN);
 	cwnd = CWND_MIN;
 	//qDebug("rtxTimeout: ssthresh = %d, cwnd = %d", ssthresh, cwnd);
 
-	// Notify the upper layer of the un-acked data packets.
-	int ackdiff = txdatseq - txackseq;
-	if (ackdiff > 0) {
-		txackseq = txdatseq;
-		if (ackdiff < maskBits)
-			txackmask <<= ackdiff;
-		else
-			txackmask = 0;
-
-		// Must do this last, since it may transmit new packets
-		missed(txackseq-ackdiff+1, ackdiff);
-
-		// Finally, notice packets going out-of-window
-		expire(txackseq-maskBits+1-ackdiff, ackdiff);
+	// Assume that all in-flight data packets have been dropped,
+	// and notify the upper layer as such.
+	// Snapshot txseq first, because the missed() calls in the loop
+	// might cause more packets to be transmitted.
+	quint64 seqlim = txseq;
+	for (quint64 seq = txevtseq; seq < seqlim; seq++) {
+		TxEvent &e = txevts[seq - txevtseq];
+		if (e.pipe) {
+			e.pipe = false;
+			txfltcnt--;
+			txfltsize -= e.size;
+			missed(seq, 1);
+			qDebug() << this << "rto-missed seq" << seq
+				<< "txfltcnt" << txfltcnt;
+		}
+	}
+	if (seqlim == txseq) {
+		Q_ASSERT(txfltcnt == 0);
+		Q_ASSERT(txfltsize == 0);
 	}
 
 	// Force at least one new packet transmission regardless of cwnd.
@@ -389,8 +405,8 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 					- ((qint32)txackseq << chanBits))
 				>> chanBits;
 	quint64 ackseq = txackseq + ackdiff;
-	//qDebug("Flow: recv seq %llu ack %llu(%d) len %d",
-	//	pktseq, ackseq, ackct, pkt.size());
+	qDebug("Flow: recv seq %llu ack %llu(%d) len %d",
+		pktseq, ackseq, ackct, pkt.size());
 	if (ackseq >= txseq) {
 		qDebug() << "Flow receive: got ACK for packet " << ackseq
 			<< "not transmitted yet";
@@ -409,82 +425,74 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 		else
 			txackmask = 0;
 
-		// Determine the number of actual newly-acknowledged packets,
-		// and detect packet loss/delay.
-		// XXX wait some dupthresh before fast retransmit!
-		newpackets = (unsigned)ackdiff;
-		if (newpackets > ackct+1) {
-			int nmissed = newpackets - (ackct+1);
-			newpackets = ackct+1;
-			//qDebug("Missed %d packets %lld-%lld", nmissed,
-			//	txackseq-ackdiff+1, txackseq-newpackets);
+		// Determine the number of newly-acknowledged packets
+		// since the highest previously acknowledged sequence number.
+		// (Out-of-order ACKs are handled separately below.)
+		newpackets = qMin((unsigned)ackdiff, ackct+1);
 
-			// Notify congestion control
-			if (!nocc) switch (ccmode) {
-			case CC_TCP: 
-			case CC_DELAY:
-			case CC_VEGAS: {
-				// Packet loss detected -
-				// perform standard TCP congestion control
-				if (txackseq-newpackets <= recovseq) {
-					// We're in a fast recovery window:
-					// this isn't a new loss event.
-					break;
-				}
-
-				// new loss event: cut ssthresh and cwnd
-				//ssthresh = (txseq - txackseq) / 2;	XXX
-				ssthresh = cwnd / 2;
-				ssthresh = qMax(ssthresh, CWND_MIN);
-				//qDebug("%d PACKETS LOST: cwnd %d -> %d",
-				//	ackdiff - newpackets, cwnd, ssthresh);
-				cwnd = ssthresh;
-
-				// fast recovery for the rest of this window
-				recovseq = txseq;
-
-				break; }
-
-			case CC_AGGRESSIVE: {
-				// Number of packets we think have been lost
-				// so far during this round-trip.
-				int lost = (txackseq - markbase) - markacks;
-				lost = qMax(0, lost);
-
-				// Number of packets we expect to receive,
-				// assuming the lost ones are really lost
-				// and we don't lose any more this round-trip.
-				unsigned expected = marksent - lost;
-
-				// Clamp the congestion window to this value.
-				if (expected < cwnd) {
-					qDebug("%d PACKETS LOST: cwnd %d -> %d",
-						ackdiff - newpackets,
-						cwnd, expected);
-					cwnd = ssbase = expected;
-					cwnd = qMax(CWND_MIN, cwnd);
-				}
-				break; }
-			}
-
-			// Notify the upper layer of the missed packets
-			missed(txackseq - ackdiff + 1, nmissed);
-		}
+		qDebug() << this << "advanced" << ackdiff
+			<< "ackct" << ackct
+			<< "newpackets" << newpackets
+			<< "txackseq" << txackseq;
 
 		// Record the new in-sequence packets in txackmask as received.
 		// (But note: ackct+1 may also include out-of-sequence pkts.)
 		txackmask |= (1 << newpackets) - 1;
 
-		// Notify the upper layer of the acknowledged packets
-		acked(txackseq - newpackets + 1, newpackets, pktseq);
+		// Notify the upper layer of newly-acknowledged data packets
+		for (quint64 seq = txackseq - newpackets + 1;
+				seq <= txackseq; seq++) {
+			TxEvent &e = txevts[seq - txevtseq];
+			if (e.pipe) {
+				e.pipe = false;
+				txfltcnt--;
+				txfltsize -= e.size;
 
-		// Finally, notice packets going out-of-window
-		expire(txackseq-maskBits+1-ackdiff, ackdiff);
+				acked(seq, 1, pktseq);
+			}
+		}
+
+		// Infer that packets left un-acknowledged sufficiently late
+		// have been dropped, and notify the upper layer as such.
+		// XX we could avoid some of this arithmetic if we just
+		// made sequence numbers start a bit higher.
+		quint64 misslim = txackseq - qMin(txackseq, (quint64)
+					qMax(missthresh, newpackets));
+		for (quint64 missseq = txackseq - qMin(txackseq, (quint64)
+					(missthresh+ackdiff-1));
+				missseq <= misslim; missseq++) {
+			TxEvent &e = txevts[missseq - txevtseq];
+			if (e.pipe) {
+				//qDebug() << this << "seq" << txevtseq
+				//	<< "inferred dropped";
+				e.pipe = false;
+				txfltcnt--;
+				txfltsize -= e.size;
+				ccMissed(missseq);
+				missed(missseq, 1);
+				qDebug() << this << "infer-missed seq"
+					<< missseq << "txfltcnt" << txfltcnt;
+			}
+		}
+
+		// Finally, notice packets as they exit our ack window,
+		// and garbage collect their transmit records,
+		// since they can never be acknowledged after that.
+		if (txackseq > (unsigned)maskBits) {
+			while (txevtseq <= txackseq-maskBits) {
+				qDebug() << this << "seq" << txevtseq
+					<< "expired";
+				Q_ASSERT(!txevts.head().pipe);
+				txevts.removeFirst();
+				txevtseq++;
+				expire(txevtseq-1, 1);
+			}
+		}
 
 		// Reset the retransmission timer, since we've made progress.
 		// Only re-arm it if there's still outstanding unACKed data.
 		setLinkStatus(LinkUp);
-		if (txdatseq > txackseq) {
+		if (txfltcnt) {
 			//qDebug() << this << "receive: rtxstart at time"
 			//	<< QDateTime::currentDateTime()
 			//		.toString("h:mm:ss:zzz");
@@ -493,8 +501,11 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 			rtxtimer.stop();
 		}
 
+		// Now that we've moved txackseq forward to the packet's ackseq,
+		// they're now the same, which is important to the code below.
 		ackdiff = 0;
 	}
+	Q_ASSERT(ackdiff <= 0);
 
 	// Handle acknowledgments for any straggling out-of-order packets
 	// (or an out-of-order acknowledgment for in-order packets).
@@ -509,7 +520,16 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 			if (txackmask & (1 << bit))
 				continue;	// already ACKed
 			txackmask |= (1 << bit);
-			acked(txackseq - bit, 1, pktseq);
+
+			TxEvent &e = txevts[txackseq - bit - txevtseq];
+			if (e.pipe) {
+				e.pipe = false;
+				txfltcnt--;
+				txfltsize -= e.size;
+
+				acked(txackseq - bit, 1, pktseq);
+			}
+
 			newpackets++;
 		}
 	}
@@ -551,6 +571,9 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 		//		newpackets, cwnd);
 		}
 		break; }
+
+	case CC_CTCP:
+		Q_ASSERT(0);	// XXX
 	}
 
 	// When ackseq passes markseq, we've observed a round-trip,
@@ -817,6 +840,60 @@ void Flow::acknowledge(quint16 pktseq, bool sendack)
 	}
 }
 
+void Flow::ccMissed(quint64 pktseq)
+{
+	qDebug() << "Missed seq" << pktseq;
+
+	// Notify congestion control
+	if (!nocc) switch (ccmode) {
+	case CC_TCP: 
+	case CC_DELAY:
+	case CC_VEGAS: {
+		// Packet loss detected -
+		// perform standard TCP congestion control
+		if (pktseq <= recovseq) {
+			// We're in a fast recovery window:
+			// this isn't a new loss event.
+			break;
+		}
+
+		// new loss event: cut ssthresh and cwnd
+		//ssthresh = (txseq - txackseq) / 2;	XXX
+		ssthresh = cwnd / 2;
+		ssthresh = qMax(ssthresh, CWND_MIN);
+		//qDebug("%d PACKETS LOST: cwnd %d -> %d",
+		//	ackdiff - newpackets, cwnd, ssthresh);
+		cwnd = ssthresh;
+
+		// fast recovery for the rest of this window
+		recovseq = txseq;
+
+		break; }
+
+	case CC_AGGRESSIVE: {
+		// Number of packets we think have been lost
+		// so far during this round-trip.
+		int lost = (txackseq - markbase) - markacks;
+		lost = qMax(0, lost);
+
+		// Number of packets we expect to receive,
+		// assuming the lost ones are really lost
+		// and we don't lose any more this round-trip.
+		unsigned expected = marksent - lost;
+
+		// Clamp the congestion window to this value.
+		if (expected < cwnd) {
+			qDebug("PACKETS LOST: cwnd %d -> %d", cwnd, expected);
+			cwnd = ssbase = expected;
+			cwnd = qMax(CWND_MIN, cwnd);
+		}
+		break; }
+
+	case CC_CTCP:
+		Q_ASSERT(0);	// XXX
+	}
+}
+
 void Flow::ackTimeout()
 {
 	flushack();
@@ -824,11 +901,11 @@ void Flow::ackTimeout()
 
 void Flow::statsTimeout()
 {
-	qDebug("Stats: txseq %llu txdatseq %llu 5xackseq %llu "
+	qDebug("Stats: txseq %llu txackseq %llu "
 		"rxseq %llu rxackseq %llu"
-		"cwnd %d ssthresh %d\n\t"
+		"txfltcnt %d cwnd %d ssthresh %d\n\t"
 		"cumrtt %.3f cumpps %.3f cumloss %.3f",
-		txseq, txdatseq, txackseq, rxseq, rxackseq, cwnd, ssthresh,
+		txseq, txackseq, rxseq, rxackseq, txfltcnt, cwnd, ssthresh,
 		cumrtt, cumpps, cumloss);
 }
 

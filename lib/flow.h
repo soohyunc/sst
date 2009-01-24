@@ -94,6 +94,7 @@ private:
 	//FlowCC *cc;		// Congestion control method
 	CCMode ccmode;		// Congestion control method
 	bool nocc;		// Disable congestion control.  XXX
+	unsigned missthresh;	// Threshold at which to infer packets dropped
 
 	// Per-direction unique channel IDs for this channel.
 	// Stream layer uses these in assigning USIDs to new streams.
@@ -168,15 +169,27 @@ protected:
 	// Size of rxmask, rxackmask, and txackmask fields in bits
 	static const int maskBits = 32;
 
+	struct TxEvent {
+		qint32	size;	// Total size of packet including hdr
+		bool	data;	// Was an upper-layer data packet
+		bool	pipe;	// Currently counted toward txdatpipe
+
+		inline TxEvent(qint32 size, bool isdata)
+			: size(size), data(isdata), pipe(isdata) { }
+	};
+
 	// Transmit state
 	quint64 txseq;		// Next sequence number to transmit
-	quint64 txdatseq;	// Seqno of last real data packet transmitted
+	QQueue<TxEvent> txevts;	// Record of transmission events (XX data sizes)
+	quint64 txevtseq;	// Seqno of oldest recorded tx event
 	quint64 txackseq;	// Highest transmit sequence number ACK'd
 	quint64 recovseq;	// Sequence at which fast recovery finishes
 	quint64 markseq;	// Transmit sequence number of "marked" packet
 	quint64 markbase;	// Snapshot of txackseq at time mark was placed
 	Time marktime;		// Time at which marked packet was sent
 	quint32 txackmask;	// Mask of packets transmitted and ACK'd
+	quint32	txfltcnt;	// Data packets currently in flight
+	quint32	txfltsize;	// Data bytes currently in flight
 	quint32 markacks;	// Number of ACK'd packets since last mark
 	quint32 marksent;	// Number of ACKs expected after last mark
 	quint32 cwnd;		// Current congestion window
@@ -251,14 +264,6 @@ protected:
 	inline qint64 unackedPackets()
 		{ return txseq - txackseq; }
 
-	// Compute current number of un-acknowledged data packets.
-	// Note that txackseq might be greater than txdatseq
-	// if we have sent ACKs since our last real data transmission
-	// and the other side has ACKed some of those ACKs
-	// (e.g., piggybacked on data packets it is sending us).
-	inline qint64 unackedDataPackets()
-		{ return (txdatseq > txackseq) ? (txdatseq - txackseq) : 0; }
-
 	// Compute the time elapsed since the mark in microseconds.
 	qint64 markElapsed();
 
@@ -279,7 +284,8 @@ public:
 
 	// Congestion information accessors for flow monitoring purposes
 	inline int txCongestionWindow() { return cwnd; }
-	inline int txPacketsInFlight() { return unackedDataPackets(); }
+	inline int txBytesInFlight() { return txfltsize; }
+	inline int txPacketsInFlight() { return txfltcnt; }
 
 signals:
 	// Indicates when this flow observes a change in link status.
@@ -307,7 +313,7 @@ private:
 	virtual void receive(QByteArray &msg, const SocketEndpoint &src);
 
 	// Internal transmit methods.
-	bool tx(QByteArray &pkt, quint32 packseq, quint64 &pktseq);
+	bool tx(QByteArray &pkt, quint32 packseq, quint64 &pktseq, bool isdata);
 	inline bool txack(quint64 ackseq, unsigned ackct)
 		{ QByteArray pkt; return transmitAck(pkt, ackseq, ackct); }
 	inline void flushack()
@@ -324,6 +330,9 @@ private:
 	inline void setLinkStatus(LinkStatus newstat)
 		{ if (linkstat != newstat || newstat == LinkStalled) {
 			linkStatusChanged(linkstat = newstat); } }
+
+	// Congestion control
+	void ccMissed(quint64 pktseq);
 
 
 private slots:

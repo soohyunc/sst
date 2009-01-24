@@ -713,12 +713,17 @@ void BaseStream::acked(StreamFlow *flow, const Packet &pkt, quint64 rxseq)
 		// Mark the segment no longer "in flight".
 		endflight(pkt);
 
-		// Record this TSN as having been ACKed,
+		// Record this TSN as having been ACKed (if not already),
 		// so that we don't spuriously resend it
 		// if another instance is back in our transmit queue.
-		twait.remove(pkt.tsn);
-		twaitsize -= pkt.payloadSize();
-		Q_ASSERT(twait.isEmpty() == (twaitsize == 0));
+		if (twait.remove(pkt.tsn)) {
+			twaitsize -= pkt.payloadSize();
+			//qDebug() << "twait remove" << pkt.tsn
+			//	<< "size" << pkt.payloadSize()
+			//	<< "new cnt" << twait.size()
+			//	<< "twaitsize" << twaitsize;
+		}
+		Q_ASSERT(twaitsize >= 0);
 		if (strm)
 			strm->bytesWritten(pkt.payloadSize());
 			// XXX delay and coalesce signal
@@ -1582,6 +1587,9 @@ int BaseStream::writeData(const char *data, int totsize, quint8 endflags)
 		// Hold onto the packet data until it gets ACKed
 		twait.insert(p.tsn);
 		twaitsize += size;
+		//qDebug() << "twait insert" << p.tsn << "size" << size
+		//	<< "new cnt" << twait.size()
+		//	<< "twaitsize" << twaitsize;
 
 		// Queue up the segment for transmission ASAP
 		txenqueue(p);
