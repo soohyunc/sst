@@ -218,8 +218,8 @@ bool Flow::tx(QByteArray &pkt, quint32 packseq, quint64 &pktseq, bool isdata)
 	if (isdata) {
 		txfltcnt++;
 		txfltsize += evt.size;
-		qDebug() << this << "tx-data seq" << txseq
-			<< "txfltcnt" << txfltcnt;
+		//qDebug() << this << "tx-data seq" << txseq
+		//	<< "txfltcnt" << txfltcnt;
 	}
 	txevts.enqueue(evt);
 	Q_ASSERT(txevtseq + txevts.size() == txseq);
@@ -297,11 +297,19 @@ void Flow::rtxTimeout(bool fail)
 	// with an exponentially increased backoff delay.
 	rtxtimer.restart();
 
-	// Reset cwnd and go back to slow start
-	ssthresh = txfltcnt / 2;
-	ssthresh = qMax(ssthresh, CWND_MIN);
-	cwnd = CWND_MIN;
-	//qDebug("rtxTimeout: ssthresh = %d, cwnd = %d", ssthresh, cwnd);
+	if (!nocc) switch (ccmode) {
+	default:
+		// Reset cwnd and go back to slow start
+		ssthresh = txfltcnt / 2;
+		ssthresh = qMax(ssthresh, CWND_MIN);
+		cwnd = CWND_MIN;
+		//qDebug("rtxTimeout: ssthresh = %d, cwnd = %d",
+		//		ssthresh, cwnd);
+
+	case CC_FIXED:
+		break;	// fixed cwnd, no congestion control
+	}
+
 
 	// Assume that all in-flight data packets have been dropped,
 	// and notify the upper layer as such.
@@ -405,8 +413,8 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 					- ((qint32)txackseq << chanBits))
 				>> chanBits;
 	quint64 ackseq = txackseq + ackdiff;
-	qDebug("Flow: recv seq %llu ack %llu(%d) len %d",
-		pktseq, ackseq, ackct, pkt.size());
+	//qDebug("Flow: recv seq %llu ack %llu(%d) len %d",
+	//	pktseq, ackseq, ackct, pkt.size());
 	if (ackseq >= txseq) {
 		qDebug() << "Flow receive: got ACK for packet " << ackseq
 			<< "not transmitted yet";
@@ -430,10 +438,10 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 		// (Out-of-order ACKs are handled separately below.)
 		newpackets = qMin((unsigned)ackdiff, ackct+1);
 
-		qDebug() << this << "advanced" << ackdiff
-			<< "ackct" << ackct
-			<< "newpackets" << newpackets
-			<< "txackseq" << txackseq;
+		//qDebug() << this << "advanced" << ackdiff
+		//	<< "ackct" << ackct
+		//	<< "newpackets" << newpackets
+		//	<< "txackseq" << txackseq;
 
 		// Record the new in-sequence packets in txackmask as received.
 		// (But note: ackct+1 may also include out-of-sequence pkts.)
@@ -480,8 +488,8 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 		// since they can never be acknowledged after that.
 		if (txackseq > (unsigned)maskBits) {
 			while (txevtseq <= txackseq-maskBits) {
-				qDebug() << this << "seq" << txevtseq
-					<< "expired";
+				//qDebug() << this << "seq" << txevtseq
+				//	<< "expired";
 				Q_ASSERT(!txevts.head().pipe);
 				txevts.removeFirst();
 				txevtseq++;
@@ -574,6 +582,9 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 
 	case CC_CTCP:
 		Q_ASSERT(0);	// XXX
+
+	case CC_FIXED:
+		break;	// fixed cwnd, no congestion control
 	}
 
 	// When ackseq passes markseq, we've observed a round-trip,
@@ -724,6 +735,8 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 #endif
 			break; }
 
+		case CC_FIXED:
+			break;	// fixed cwnd, no congestion control
 		}
 
 		if (nocc)
@@ -753,9 +766,9 @@ void Flow::receive(QByteArray &pkt, const SocketEndpoint &)
 
 void Flow::acknowledge(quint16 pktseq, bool sendack)
 {
-	qDebug() << this << "acknowledging" << pktseq
-		<< (sendack ? "(sending)" : "(not sending)")
-		<< "rxunacked" << rxunacked;
+	//qDebug() << this << "acknowledging" << pktseq
+	//	<< (sendack ? "(sending)" : "(not sending)")
+	//	<< "rxunacked" << rxunacked;
 
 	// Update our receive state to account for this packet
 	qint32 seqdiff = pktseq - rxackseq;
@@ -891,6 +904,9 @@ void Flow::ccMissed(quint64 pktseq)
 
 	case CC_CTCP:
 		Q_ASSERT(0);	// XXX
+
+	case CC_FIXED:
+		break;	// fixed cwnd, no congestion control
 	}
 }
 
@@ -911,7 +927,7 @@ void Flow::statsTimeout()
 
 void Flow::acked(quint64 seq, int n, quint64)
 {
-	qDebug() << this << "tx seq" << seq << "-" << seq+n-1 << "acked";
+	//qDebug() << this << "tx seq" << seq << "-" << seq+n-1 << "acked";
 }
 
 void Flow::missed(quint64, int)

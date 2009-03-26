@@ -36,6 +36,7 @@ struct LinkParams {
 	int rate;	// Bandwidth in bytes per second
 	int delay;	// Link delay in microseconds
 	int qlen;	// Router queue length in microseconds
+	float loss;	// Random loss rate, form 0.0 to 1.0
 
 	QString toString();
 };
@@ -43,6 +44,7 @@ struct LinkParams {
 enum LinkPreset {
 	DSL15,		// 1.5Mbps/384Kbps DSL link
 	Cable5,		// 5Mbps cable modem link
+	Sat10,		// 10Mbps satellite link with 500ms delay
 	Eth10,		// 10Mbps Ethernet link
 	Eth100,		// 100Mbps Ethernet link
 	Eth1000,	// 1000Mbps Ethernet link
@@ -206,9 +208,25 @@ public:
 	inline void setLinkParams(const LinkParams &params)
 		{ setLinkParams(params, params); }
 
+	// Set link rate in bytes per second
 	inline void setLinkRate(int down, int up)
 		{ params[0].rate = down; params[1].rate = up; }
 	inline void setLinkRate(int bps) { setLinkRate(bps, bps); }
+
+	// Set link delay in microseconds
+	inline void setLinkDelay(int down, int up)
+		{ params[0].delay = down; params[1].delay = up; }
+	inline void setLinkDelay(int usecs) { setLinkDelay(usecs, usecs); }
+
+	// Set queue length in microseconds
+	inline void setLinkQueue(int down, int up)
+		{ params[0].qlen = down; params[1].qlen = up; }
+	inline void setLinkQueue(int usecs) { setLinkQueue(usecs, usecs); }
+
+	// Set link's random loss rate as a fraction between 0.0 and 1.0.
+	inline void setLinkLoss(float down, float up)
+		{ params[0].loss = down; params[1].loss = up; }
+	inline void setLinkLoss(float loss) { setLinkLoss(loss, loss); }
 };
 
 class Simulator : public QObject

@@ -53,6 +53,14 @@ private:
 	int p2;
 	int nmigrates;
 
+	long long lastmigrtime;
+
+	long long lasttime;
+	long long totarrived, lasttotarrived;
+	double smoothrate;
+
+	Timer ticker;
+
 public:
 	MigrateTest();
 
@@ -60,11 +68,14 @@ public:
 
 private:
 	void ping(Stream *strm);
+	void arrived(int amount);
 
 private slots:
 	void gotConnection();
+	void gotData();
 	void gotMessage();
 	void gotTimeout();
+	void gotTick();
 };
 
 

@@ -56,6 +56,7 @@ enum CCMode {
 	CC_DELAY,
 	CC_VEGAS,
 	CC_CTCP,
+	CC_FIXED,
 };
 
 
@@ -281,6 +282,9 @@ public:
 	void ccReset();
 	inline CCMode ccMode() const { return ccmode; }
 	inline void setCCMode(CCMode mode) { ccmode = mode; ccReset(); }
+
+	// for CC_FIXED: fixed congestion window for reserved-bandwidth links
+	inline void setCCWindow(int cwnd) { this->cwnd = cwnd; }
 
 	// Congestion information accessors for flow monitoring purposes
 	inline int txCongestionWindow() { return cwnd; }

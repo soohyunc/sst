@@ -19,6 +19,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <netinet/in.h>
 
 #include <QCoreApplication>
@@ -129,7 +130,7 @@ const LinkParams cable5_up =
 #define ETH_QPKTS	25	// Typical queue length in packets (???)
 #define ETH_QBYTES	(ETH_MTU * ETH_QPKTS)
 
-// 10Mbps Ethernet link
+// Ethernet link parameters (XXX are queue length realistic?)
 const LinkParams eth10 =
 	{ ETH10_RATE, ETH10_DELAY/2, txtime(ETH_QBYTES,ETH10_RATE) };
 const LinkParams eth100 =
@@ -138,7 +139,12 @@ const LinkParams eth1000 =
 	{ ETH1000_RATE, ETH1000_DELAY/2, txtime(ETH_QBYTES,ETH1000_RATE) };
 
 
-static bool tracepkts = true;
+// Satellite link parameters (XXX need to check)
+const LinkParams sat10 =
+	{ ETH10_RATE, 500000, 1024*1024 };
+
+
+static bool tracepkts = false;
 
 
 
@@ -220,6 +226,13 @@ SimPacket::SimPacket(SimHost *srch, const Endpoint &src,
 	// Pick the correct set of link parameters to simulate with
 	LinkParams &p = lnk->params[!w];
 	qint64 &arr = lnk->arrival[!w];
+
+	// Simulate random loss if appropriate
+	if (p.loss && drand48() <= p.loss) {
+		qDebug() << this << "random DROP";
+		deleteLater();
+		return;
+	}
 
 	// Earliest time packet could start to arrive based on network delay
 	qint64 nomarr = curusecs + p.delay;
@@ -485,6 +498,7 @@ void SimLink::setPreset(LinkPreset preset)
 	switch (preset) {
 	case DSL15:	setLinkParams(dsl15_dn, dsl15_up); break;
 	case Cable5:	setLinkParams(cable5_dn, cable5_up); break;
+	case Sat10:	setLinkParams(sat10); break;
 	case Eth10:	setLinkParams(eth10); break;
 	case Eth100:	setLinkParams(eth100); break;
 	case Eth1000:	setLinkParams(eth1000); break;

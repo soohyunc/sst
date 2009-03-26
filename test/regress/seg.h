@@ -58,6 +58,8 @@ private:
 	qint64 recvtotlast, recvtimelast;
 	double recvrate;
 
+	Timer ticker;
+
 public:
 	SegTest();
 
@@ -68,6 +70,7 @@ private slots:
 	void srvConnection();
 	void srvMessage();
 	void gotEventStep();
+	void gotTick();
 };
 
 

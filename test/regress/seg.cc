@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include <QTextStream>
 #include <QtDebug>
@@ -34,7 +35,11 @@ using namespace SST;
 
 #define FLOW_PORT	NETSTERIA_DEFAULT_PORT
 
-#define SEGS 2
+#define SEGS 1
+
+
+// Time period for bandwidth sampling
+#define TICKTIME	100
 
 
 QTextStream out(stdout);
@@ -50,15 +55,39 @@ SegTest::SegTest()
 	srv(&h4),
 	srvs(NULL),
 	sendcnt(0), recvcnt(0), sendtot(0), recvtot(0), delaytot(0),
-	recvtotlast(0), recvtimelast(0), recvrate(0)
+	recvtotlast(0), recvtimelast(0), recvrate(0),
+	ticker(&h1)
 {
 	// Gather simulation statistics
 	connect(&sim, SIGNAL(eventStep()), this, SLOT(gotEventStep()));
 
 	// Set link parameters
-	l12.setPreset(DSL15);
+	//l12.setPreset(DSL15);
 	//l23.setPreset(Eth10);
 	//l23.setLinkRate(50*1024*1024/8);
+
+	// Test topology with satellite link in the middle
+	//l12.setPreset(Eth100);
+	//l23.setPreset(Sat10);
+	//l34.setPreset(Eth100);
+
+#if 0
+	// Test topology with long fat network in the middle
+	l12.setPreset(Eth100);
+	l23.setPreset(Eth10);
+//		l23.setLinkLoss(0.01);
+		l23.setLinkDelay(50000);
+		l23.setLinkQueue(50000);
+	l34.setPreset(Eth100);
+#endif
+
+#if 1
+	// Simple two-segment test topology over a link
+	// functionally equivalent to the combination of the three above
+	l12.setPreset(Eth10);
+		l12.setLinkDelay(250+50000+250);
+		l12.setLinkQueue(2861+50000+2861);
+#endif
 
 	// Set up the linear topology and flow layer forwarding chain
 	switch (SEGS) {
@@ -129,6 +158,9 @@ SegTest::SegTest()
 	// Open a connection to the server
 	cli.connectTo(h4.hostIdent(), "regress", "seg");
 	cli.connectAt(Endpoint(QHostAddress("1.1.34.4"), NETSTERIA_DEFAULT_PORT));
+
+	connect(&ticker, SIGNAL(timeout(bool)), this, SLOT(gotTick()));
+	ticker.start(TICKTIME);
 }
 
 void SegTest::cliReadyWrite()
@@ -156,9 +188,16 @@ void SegTest::srvConnection()
 	sr4 = fr4.lastiseg;
 	Q_ASSERT(sr4);
 
+	// in case all segments aren't used...
+	if (!si2) si2 = si1;
+	if (!si3) si3 = si1;
+
 	//si1->setCCMode(CC_VEGAS);
 	//si2->setCCMode(CC_VEGAS);
 	//si3->setCCMode(CC_VEGAS);
+
+	//si2->setCCMode(CC_FIXED);
+	//si2->setCCWindow(116);	// for Eth10 with qlen&delay = 50ms
 
 	srvs = srv.accept();
 	if (!srvs) return;
@@ -182,7 +221,7 @@ void SegTest::srvMessage()
 		recvcnt++;
 		recvtot += buf.size();
 
-		qDebug() << srvs << "recv msg size" << buf.size();
+		//qDebug() << srvs << "recv msg size" << buf.size();
 
 		Q_ASSERT(buf.size() == StreamProtocol::mtu);	// XXX
 		qint64 *data = (qint64*)buf.data();
@@ -212,23 +251,6 @@ void SegTest::gotEventStep()
 		return;		// flows not yet setup
 
 #if 0
-	// Bandwidth monitoring
-	qint64 curtime = sim.currentTime().usecs;
-	if (recvtot > recvtotlast && curtime > recvtimelast) {
-		double instrate = (double)(recvtot - recvtotlast) /
-					((curtime - recvtimelast)/1000000.0);
-		recvrate = (recvrate*99.0 + instrate)/100.0;
-
-		recvtotlast = recvtot;
-		recvtimelast = curtime;
-
-		out << curtime/1000000.0 << " " << recvtot << " "
-			<< instrate << " " << recvrate << " "
-			<< endl;
-	}
-#endif
-
-#if 1
 	// Windows and queues on initiator-to-responder path
 	out << (double)sim.currentTime().usecs/1000000.0 << " "
 		<< sendtot << " " << recvtot << " "
@@ -247,6 +269,44 @@ void SegTest::gotEventStep()
 		<< sr3->txPacketsInFlight() << "/" << sr3->txCongestionWindow()
 		<< sr2->txPacketsInFlight() << "/" << sr2->txCongestionWindow();
 #endif
+}
+
+void SegTest::gotTick()
+{
+	// Restart the timer
+	ticker.start(TICKTIME);
+
+	// Bandwidth monitoring
+	qint64 curtime = sim.currentTime().usecs;
+	if (recvtot > recvtotlast && curtime > recvtimelast) {
+		double instrate = (double)(recvtot - recvtotlast)/1024.0 /
+					((curtime - recvtimelast)/1000000.0);
+		recvrate = (recvrate*9.0 + instrate)/10.0;
+
+		recvtotlast = recvtot;
+		recvtimelast = curtime;
+
+		out << curtime/1000000.0 << " " << recvtot << " "
+			<< instrate << " " << recvrate << " "
+			<< si1->txPacketsInFlight() << " "
+			<< si2->txPacketsInFlight() << " "
+			<< si3->txPacketsInFlight() << " "
+			<< si1->txCongestionWindow() << " "
+			<< si2->txCongestionWindow() << " "
+			<< si3->txCongestionWindow() << " "
+			<< endl;
+	}
+
+	int phase = curtime / 10000000;	// every 10 secs...
+	if (phase) {
+		float loss = 0.001 * exp2((phase-1)*2);
+#if SEGS == 1
+		l12.setLinkLoss(loss);
+#else
+		l23.setLinkLoss(loss);
+#endif
+		//qDebug() << curtime << " set link loss to " << loss;
+	}
 }
 
 void SegTest::run()

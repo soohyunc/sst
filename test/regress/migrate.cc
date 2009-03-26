@@ -28,11 +28,23 @@
 using namespace SST;
 
 
-#define MSGPERIOD	(1024*1024)	// transfer min 1MB between migrs
+#define MIGRBYTES	(10*1024*1024)	// transfer min 1MB between migrs
+//#define MIGRTIME	(10*1000000)	// time between migrations
 
 //#define MAXMSGS		1000
 
 #define MAXMIGRS	10
+
+
+#define MINP2	0	// Minimum message size power-of-two
+#define MAXP2	16	// Minimum message size power-of-two
+
+//#define MINP2	28	// Minimum message size power-of-two
+//#define MAXP2	28	// Minimum message size power-of-two
+
+
+// Time period for bandwidth sampling
+//#define TICKTIME	10000
 
 
 MigrateTest::MigrateTest()
@@ -42,11 +54,17 @@ MigrateTest::MigrateTest()
 	srv(&srvhost),
 	srvs(NULL),
 	migrater(&clihost),
-	narrived(0),
-	nmigrates(0)
+	narrived(0), nmigrates(0),
+	lastmigrtime(0),
+	totarrived(0), lasttotarrived(0), smoothrate(0),
+	ticker(&clihost)
 {
+	// Gather simulation statistics
+	//connect(&sim, SIGNAL(eventStep()), this, SLOT(gotEventStep()));
+
 	curaddr = cliaddr;
 	link.connect(&clihost, curaddr, &srvhost, srvaddr);
+	link.setPreset(Eth10);
 
 	starttime = clihost.currentTime();
 	connect(&migrater, SIGNAL(timeout(bool)), this, SLOT(gotTimeout()));
@@ -58,9 +76,20 @@ MigrateTest::MigrateTest()
 		qFatal("Can't listen on service name");
 
 	// Open a connection to the server
+	connect(&cli, SIGNAL(readyRead()), this, SLOT(gotData()));
 	connect(&cli, SIGNAL(readyReadMessage()), this, SLOT(gotMessage()));
 	cli.connectTo(srvhost.hostIdent(), "regress", "migrate");
 	cli.connectAt(Endpoint(srvaddr, NETSTERIA_DEFAULT_PORT));
+
+#ifdef MIGRTIME
+	// If migrating purely periodically, start the timer
+	migrater.start(MIGRTIME);
+#endif
+
+#ifdef TICKTIME
+	connect(&ticker, SIGNAL(timeout(bool)), this, SLOT(gotTick()));
+	ticker.start(TICKTIME);
+#endif
 
 	// Get the ping-pong process going...
 	ping(&cli);
@@ -76,17 +105,34 @@ void MigrateTest::gotConnection()
 
 	srvs->listen(Stream::Unlimited);
 
+	connect(srvs, SIGNAL(readyRead()), this, SLOT(gotData()));
 	connect(srvs, SIGNAL(readyReadMessage()), this, SLOT(gotMessage()));
 }
 
 void MigrateTest::ping(Stream *strm)
 {
 	// Send a random-size message
-	int p2 = lrand48() % 16;
+	int p2 = (MAXP2 > MINP2)
+			? (lrand48() % (MAXP2-MINP2)) + MINP2
+			: MAXP2;
 	QByteArray buf;
 	buf.resize(1 << p2);
 	//qDebug() << strm << "send msg size" << buf.size();
 	strm->writeMessage(buf);
+}
+
+void MigrateTest::gotData()
+{
+	Stream *strm = (Stream*)QObject::sender();
+	while (true) {
+		QByteArray buf = strm->readData();
+		if (buf.isEmpty())
+			return;
+
+		arrived(buf.size());
+		qDebug() << strm << "recv size" << buf.size()
+			<< "count" << narrived << "/" << MIGRBYTES;
+	}
 }
 
 void MigrateTest::gotMessage()
@@ -97,27 +143,36 @@ void MigrateTest::gotMessage()
 		if (buf.isNull())
 			return;
 
-		int newarrived = narrived + buf.size();
-		if (narrived < MSGPERIOD && newarrived >= MSGPERIOD) {
-			timeperiod = clihost.currentTime().usecs
-				- starttime.usecs;
-			qDebug() << "migr" << nmigrates << "timeperiod:"
-				<< (double)timeperiod / 1000000.0;
-
-			// Wait some random addional time before migrating,
-			// to ensure that migration can happen at
-			// "unexpected moments"...
-			migrater.start(timeperiod * drand48());
-		}
-		narrived = newarrived;
-
+		arrived(buf.size());
 		qDebug() << strm << "recv msg size" << buf.size()
-			<< "count" << narrived << "/" << MSGPERIOD;
+			<< "count" << narrived << "/" << MIGRBYTES;
 
 		// Keep ping-ponging until we're done.
 		if (nmigrates < MAXMIGRS)
 			ping(strm);
 	}
+}
+
+void MigrateTest::arrived(int amount)
+{
+	// Count arrived data and use it to time the next migration.
+	int newarrived = narrived + amount;
+	if (narrived < MIGRBYTES && newarrived >= MIGRBYTES) {
+		timeperiod = clihost.currentTime().usecs
+			- starttime.usecs;
+		qDebug() << "migr" << nmigrates << "timeperiod:"
+			<< (double)timeperiod / 1000000.0;
+
+#ifndef MIGRTIME
+		// Wait some random addional time before migrating,
+		// to ensure that migration can happen at
+		// "unexpected moments"...
+		migrater.start(timeperiod * drand48());
+#endif
+	}
+	narrived = newarrived;
+
+	totarrived += amount;
 }
 
 void MigrateTest::gotTimeout()
@@ -139,6 +194,35 @@ void MigrateTest::gotTimeout()
 	starttime = clihost.currentTime();
 	narrived = 0;
 	nmigrates++;
+
+#ifdef MIGRTIME
+	// If migrating purely periodically, start the timer
+	migrater.start(MIGRTIME);
+#endif
+}
+
+void MigrateTest::gotTick()
+{
+#ifdef TICKTIME
+	// Restart the timer
+	ticker.start(TICKTIME);
+
+	long long difftime = sim.currentTime().usecs - lasttime;
+	int diffbytes = totarrived - lasttotarrived;
+	if (difftime == 0)
+		return;
+
+	float instrate = (float)diffbytes / difftime * 1000000.0;
+	smoothrate = (smoothrate * 9 + instrate) / 10;
+
+	printf("%f %f %lld %d %f %f\n",
+		(float)sim.currentTime().usecs/1000000.0,
+		(float)difftime/1000000.0,
+		totarrived, diffbytes, instrate, smoothrate);
+
+	lasttime = sim.currentTime().usecs;
+	lasttotarrived = totarrived;
+#endif
 }
 
 void MigrateTest::run()
