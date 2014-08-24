@@ -21,6 +21,7 @@
 #ifndef SST_SHA2_H
 #define SST_SHA2_H
 
+#include <stdint.h>
 #include <QIODevice>
 
 #include <openssl/sha.h>
