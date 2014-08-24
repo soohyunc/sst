@@ -1,5 +1,6 @@
 language: cpp
 compiler:
+      - g++
       - gcc
       - clang
 # Change this to your needs
